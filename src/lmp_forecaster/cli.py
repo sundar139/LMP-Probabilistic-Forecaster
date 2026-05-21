@@ -11,6 +11,12 @@ from rich import print
 
 from lmp_forecaster.config.paths import get_project_paths
 from lmp_forecaster.config.settings import get_settings
+from lmp_forecaster.data.build_panel import (
+    PanelBuildConfig,
+    build_single_zone_panel,
+    summarize_panel,
+    write_panel,
+)
 from lmp_forecaster.data.http_client import HttpRequestError
 from lmp_forecaster.data.openmeteo_weather import (
     OpenMeteoRequestConfig,
@@ -21,6 +27,7 @@ from lmp_forecaster.data.pjm_lmp import PjmLmpRequestConfig, pull_pjm_lmp_smoke
 from lmp_forecaster.data.source_registry import load_source_registry
 from lmp_forecaster.data.synthetic_panel import SyntheticPanelConfig, make_synthetic_panel
 from lmp_forecaster.data.zones import get_zone, load_zone_registry
+from lmp_forecaster.eval.panel_report import build_panel_summary, write_panel_summary
 
 app = typer.Typer(help="LMP forecaster CLI")
 
@@ -239,6 +246,100 @@ def make_synthetic_panel_command(
         print(f"Wrote synthetic panel to: {resolved_output}")
     else:
         print("No file written. Use --write to persist parquet output.")
+
+
+@app.command("build-single-zone-panel")
+def build_single_zone_panel_command(
+    zone: Annotated[str, typer.Option(help="Zone code, defaults to AEP.")] = "AEP",
+    lmp_path: Annotated[
+        Path | None,
+        typer.Option(help="Optional parquet path for normalized LMP input."),
+    ] = None,
+    weather_path: Annotated[
+        Path | None,
+        typer.Option(help="Optional parquet path for normalized weather input."),
+    ] = None,
+    start_date: Annotated[
+        str | None,
+        typer.Option(help="Inclusive start date (YYYY-MM-DD)."),
+    ] = None,
+    end_date: Annotated[
+        str | None,
+        typer.Option(help="Inclusive end date (YYYY-MM-DD)."),
+    ] = None,
+    output: Annotated[
+        Path | None,
+        typer.Option(help="Optional parquet output path."),
+    ] = None,
+    allow_synthetic_lmp: Annotated[
+        bool,
+        typer.Option(help="Allow deterministic synthetic LMP fallback."),
+    ] = False,
+    allow_synthetic_weather: Annotated[
+        bool,
+        typer.Option(help="Allow deterministic synthetic weather fallback."),
+    ] = False,
+    write: Annotated[
+        bool,
+        typer.Option(help="Write panel parquet under processed path when set."),
+    ] = False,
+    summary: Annotated[
+        bool,
+        typer.Option(help="Write panel summary JSON under cache reports when set."),
+    ] = False,
+) -> None:
+    """Build a cleaned single-zone panel with leakage-safe features."""
+    parsed_start = _parse_iso_date_option(start_date, option_name="--start-date")
+    parsed_end = _parse_iso_date_option(end_date, option_name="--end-date")
+
+    cfg = PanelBuildConfig(
+        zone=zone.upper(),
+        input_lmp_path=lmp_path,
+        input_weather_path=weather_path,
+        output_path=output,
+        start_date=parsed_start,
+        end_date=parsed_end,
+        allow_synthetic_lmp=allow_synthetic_lmp,
+        allow_synthetic_weather=allow_synthetic_weather,
+    )
+
+    paths = get_project_paths()
+    planned_output = cfg.output_path or (
+        paths.root / "data" / "processed" / "panel" / "single_zone" / f"{cfg.zone}_panel.parquet"
+    )
+
+    print("[bold]Single-zone panel build[/bold]")
+    print(f"Zone: {cfg.zone}")
+    print(f"LMP input: {cfg.input_lmp_path or '(auto-cache lookup)'}")
+    print(f"Weather input: {cfg.input_weather_path or '(auto-cache lookup)'}")
+    print(f"Start date: {cfg.start_date}")
+    print(f"End date: {cfg.end_date}")
+    print(f"Output path: {planned_output}")
+    print(f"allow_synthetic_lmp={cfg.allow_synthetic_lmp}")
+    print(f"allow_synthetic_weather={cfg.allow_synthetic_weather}")
+
+    if cfg.allow_synthetic_lmp or cfg.allow_synthetic_weather:
+        print(
+            "WARNING: Synthetic fallback enabled. Output is for pipeline smoke testing "
+            "and is not a real PJM training dataset."
+        )
+
+    if not write:
+        print("Dry-run only. Re-run with --write to build and persist the panel.")
+        return
+
+    panel = build_single_zone_panel(cfg)
+    written = write_panel(panel, cfg)
+    stats = summarize_panel(panel)
+
+    print(f"Wrote panel: {written}")
+    print(f"Rows: {stats['rows']}")
+    print(f"Range: {stats['start_ds']} -> {stats['end_ds']}")
+
+    if summary:
+        report = build_panel_summary(panel, zone=cfg.zone)
+        report_path = write_panel_summary(report)
+        print(f"Wrote summary: {report_path}")
 
 
 if __name__ == "__main__":
