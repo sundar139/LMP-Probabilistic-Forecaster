@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Build artifacts
+build/
+dist/
+
+# Data and generated artifacts
+data/raw/**
+!data/raw/.gitkeep
+data/cache/**
+!data/cache/.gitkeep
+data/processed/**
+!data/processed/.gitkeep
+artifacts/
+outputs/
+reports/
+
+# Experiment tracking
+mlruns/
+
+# DVC
+data/.dvc/
+.dvc/cache/
+.dvc/tmp/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

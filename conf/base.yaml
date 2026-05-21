@@ -1,0 +1,17 @@
+project:
+  name: lmp-forecaster
+  timezone: America/New_York
+
+forecast:
+  horizon: 24
+  input_size: 168
+  quantiles: [0.1, 0.5, 0.9]
+  default_zone: AEP
+
+paths:
+  data_dir: data
+  raw_dir: data/raw
+  cache_dir: data/cache
+  processed_dir: data/processed
+  artifacts_dir: artifacts
+  mlruns_dir: mlruns

@@ -1,0 +1,102 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lmp-forecaster"
+version = "0.1.0"
+description = "Local-first probabilistic forecasting platform for PJM day-ahead zonal LMP"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+authors = [{ name = "Rohit" }]
+license = { text = "Proprietary" }
+dependencies = [
+  "torch",
+  "neuralforecast",
+  "lightning",
+  "pandas",
+  "polars",
+  "pyarrow",
+  "numpy",
+  "scikit-learn",
+  "optuna",
+  "mlflow",
+  "dvc",
+  "httpx",
+  "pydantic",
+  "pydantic-settings",
+  "typer",
+  "rich",
+  "python-dotenv",
+  "holidays",
+  "matplotlib",
+  "plotly",
+  "fastapi",
+  "uvicorn[standard]",
+  "streamlit",
+  "orjson",
+  "pytest",
+  "pytest-cov",
+  "ruff",
+  "mypy",
+  "PyYAML",
+]
+
+[project.scripts]
+lmp-forecaster = "lmp_forecaster.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lmp_forecaster"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/lmp_forecaster",
+  "conf",
+  "scripts",
+  "tests",
+  "README.md",
+  "pyproject.toml",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv]
+package = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "C4"]
+ignore = []
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+exclude = [
+  "^data/",
+]
+
+[[tool.mypy.overrides]]
+module = ["yaml"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["pandas"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["src"]

@@ -1,0 +1,24 @@
+sources:
+  - name: pjm_day_ahead_hourly_zonal_lmp
+    provider: PJM
+    purpose: Target variable for day-ahead hourly zonal LMP forecasting.
+    expected_frequency: hourly
+    notes: Official zonal LMP feed for PJM day-ahead market; source-of-truth target for supervised training.
+
+  - name: pjm_load_forecast_and_operational_covariates
+    provider: PJM
+    purpose: Future exogenous covariates for load-sensitive price behavior.
+    expected_frequency: hourly
+    notes: Includes load forecast and related operational signals; to be integrated in later ingestion steps.
+
+  - name: open_meteo_historical_weather
+    provider: Open-Meteo
+    purpose: Historical weather covariates aligned to market timestamps.
+    expected_frequency: hourly
+    notes: Use location-mapped weather for zones and covariate engineering.
+
+  - name: open_meteo_historical_forecast_api
+    provider: Open-Meteo
+    purpose: Leakage-safe weather forecasts for rolling-origin backtests.
+    expected_frequency: hourly
+    notes: Supports historical forecast snapshots to emulate information available at prediction time.

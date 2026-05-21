@@ -1,0 +1,70 @@
+zones:
+  - zone: AEP
+    display_name: American Electric Power
+    latitude: 39.96
+    longitude: -82.99
+    region_cluster: west
+    type: ZONE
+
+  - zone: AECO
+    display_name: Allegheny Energy Company
+    latitude: 40.44
+    longitude: -79.99
+    region_cluster: west
+    type: ZONE
+
+  - zone: ATSI
+    display_name: American Transmission Systems Incorporated
+    latitude: 41.08
+    longitude: -81.52
+    region_cluster: north
+    type: ZONE
+
+  - zone: BGE
+    display_name: Baltimore Gas and Electric
+    latitude: 39.29
+    longitude: -76.61
+    region_cluster: east
+    type: ZONE
+
+  - zone: COMED
+    display_name: Commonwealth Edison
+    latitude: 41.88
+    longitude: -87.63
+    region_cluster: west
+    type: ZONE
+
+  - zone: DOM
+    display_name: Dominion
+    latitude: 37.54
+    longitude: -77.43
+    region_cluster: south
+    type: ZONE
+
+  - zone: PECO
+    display_name: Philadelphia Electric Company
+    latitude: 39.95
+    longitude: -75.17
+    region_cluster: east
+    type: ZONE
+
+  - zone: PEPCO
+    display_name: Potomac Electric Power Company
+    latitude: 38.91
+    longitude: -77.04
+    region_cluster: east
+    type: ZONE
+
+  - zone: PPL
+    display_name: PPL Electric Utilities
+    latitude: 40.60
+    longitude: -75.49
+    region_cluster: east
+    type: ZONE
+
+  - zone: PSEG
+    display_name: Public Service Electric and Gas
+    latitude: 40.73
+    longitude: -74.17
+    region_cluster: east
+    type: ZONE
