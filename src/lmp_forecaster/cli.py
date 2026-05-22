@@ -28,6 +28,11 @@ from lmp_forecaster.data.source_registry import load_source_registry
 from lmp_forecaster.data.synthetic_panel import SyntheticPanelConfig, make_synthetic_panel
 from lmp_forecaster.data.zones import get_zone, load_zone_registry
 from lmp_forecaster.eval.panel_report import build_panel_summary, write_panel_summary
+from lmp_forecaster.models.baselines import (
+    BaselineTrainingConfig,
+    load_training_config,
+    train_single_zone_baselines,
+)
 
 app = typer.Typer(help="LMP forecaster CLI")
 
@@ -340,6 +345,102 @@ def build_single_zone_panel_command(
         report = build_panel_summary(panel, zone=cfg.zone)
         report_path = write_panel_summary(report)
         print(f"Wrote summary: {report_path}")
+
+
+@app.command("train-single-zone-baselines")
+def train_single_zone_baselines_command(
+    zone: Annotated[str, typer.Option(help="Zone code, defaults to AEP.")] = "AEP",
+    panel_path: Annotated[
+        Path | None,
+        typer.Option(help="Optional panel parquet path."),
+    ] = None,
+    allow_synthetic_panel: Annotated[
+        bool,
+        typer.Option(help="Allow synthetic panel fallback."),
+    ] = False,
+    build_panel_if_missing: Annotated[
+        bool,
+        typer.Option(help="Build panel if missing using panel builder."),
+    ] = False,
+    max_steps_smoke: Annotated[
+        int | None,
+        typer.Option(help="Override smoke max training steps."),
+    ] = None,
+    output_dir: Annotated[
+        Path | None,
+        typer.Option(help="Optional baseline artifact output directory."),
+    ] = None,
+    write: Annotated[
+        bool,
+        typer.Option(help="Run training and write artifacts when set."),
+    ] = False,
+    skip_tft: Annotated[
+        bool,
+        typer.Option(help="Skip TFT model training."),
+    ] = False,
+    skip_deepar: Annotated[
+        bool,
+        typer.Option(help="Skip DeepAR model training."),
+    ] = False,
+) -> None:
+    """Train single-zone TFT/DeepAR baselines with probabilistic outputs."""
+    cfg = load_training_config(zone.upper(), max_steps_smoke=max_steps_smoke)
+    cfg = BaselineTrainingConfig(
+        **{
+            **cfg.__dict__,
+            "zone": zone.upper(),
+            "panel_path": panel_path,
+            "allow_synthetic_panel": allow_synthetic_panel,
+            "build_panel_if_missing": build_panel_if_missing,
+            "output_dir": output_dir,
+            "skip_tft": skip_tft,
+            "skip_deepar": skip_deepar,
+        }
+    )
+
+    paths = get_project_paths()
+    resolved_panel = cfg.panel_path or (
+        paths.root / "data" / "processed" / "panel" / "single_zone" / f"{cfg.zone}_panel.parquet"
+    )
+
+    print("[bold]Single-zone baseline training[/bold]")
+    print(f"Zone: {cfg.zone}")
+    print(f"Panel path: {resolved_panel}")
+    print(f"allow_synthetic_panel={cfg.allow_synthetic_panel}")
+    print(f"build_panel_if_missing={cfg.build_panel_if_missing}")
+    print(f"horizon={cfg.horizon}, input_size={cfg.input_size}, quantiles={cfg.quantiles}")
+    print(
+        f"val_size={cfg.val_size}, test_size={cfg.test_size}, "
+        f"max_steps_smoke={cfg.max_steps_smoke}"
+    )
+    print(f"skip_tft={cfg.skip_tft}, skip_deepar={cfg.skip_deepar}")
+    print(f"Forecast cache path: {paths.root / 'data' / 'cache' / 'forecasts'}")
+    print(f"Report cache path: {paths.root / 'data' / 'cache' / 'reports'}")
+    print(f"Artifact path: {cfg.output_dir or (paths.root / 'artifacts' / 'baselines')}")
+
+    if cfg.allow_synthetic_panel:
+        print(
+            "Synthetic panel option enabled. If synthetic data is used, metrics are smoke-test "
+            "metrics only and must not be presented as PJM performance."
+        )
+
+    if not write:
+        print("Dry-run only. Re-run with --write to train and persist outputs.")
+        return
+
+    result = train_single_zone_baselines(cfg)
+
+    if result.get("data_source_label") in {"synthetic", "mixed"}:
+        print(
+            "Synthetic panel detected. Metrics are smoke-test metrics only and must not "
+            "be presented as PJM performance."
+        )
+
+    print(f"Accelerator: {result['accelerator']} ({result['device_name']})")
+    print(f"Forecast outputs: {result['forecasts']}")
+    print(f"Metrics JSON: {result['metrics_json']}")
+    print(f"Metrics CSV: {result['metrics_csv']}")
+    print(f"Training report: {result['training_report_json']}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,7 @@
+model:
+  name: DeepAR
+  lstm_hidden_size: 64
+  lstm_n_layers: 2
+  lstm_dropout: 0.1
+  learning_rate: 0.001
+  loss: quantile

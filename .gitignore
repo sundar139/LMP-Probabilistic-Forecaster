@@ -37,6 +37,10 @@ reports/
 
 # Experiment tracking
 mlruns/
+lightning_logs/
+checkpoints/
+*.ckpt
+*.log
 
 # DVC
 data/.dvc/

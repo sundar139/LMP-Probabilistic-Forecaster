@@ -95,6 +95,10 @@ ignore_missing_imports = true
 module = ["pandas"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["neuralforecast", "neuralforecast.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 minversion = "8.0"
 addopts = "-q"
