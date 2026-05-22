@@ -1,114 +1,90 @@
 # LMP Probabilistic Forecaster
 
-A local-first, production-style probabilistic forecasting platform for PJM day-ahead hourly zonal LMPs. The project is designed for industry workflows with reproducible training and evaluation, multi-horizon uncertainty outputs (P10/P50/P90), rolling-origin backtesting, and serving interfaces for both APIs and interactive dashboards.
+A local-first, production-style probabilistic forecasting platform for PJM day-ahead hourly zonal LMPs.
 
 ## Current implementation status
 
-Foundation bootstrap, ingestion smoke layer, cleaned single-zone panel builder, and single-zone baseline training are in place:
+Implemented and committed through:
+- foundation bootstrap
+- smoke ingestion adapters
+- single-zone panel builder
+- single-zone baseline training
+- real PJM ingestion support (this step)
 
-- environment, package layout, config system, source registry
-- synthetic data generator and CLI harness
-- smoke ingestion adapters for PJM + Open-Meteo
-- leakage-safe single-zone panel builder (AEP-first)
-- single-zone TFT + DeepAR baseline training CLI
-- panel/reporting/metrics utilities and mock-based tests
+This step adds real PJM AEP ingestion + validation support only.
+No model training is performed here.
 
-No multi-zone training or rolling-origin backtesting is run in this step.
+## Real PJM ingestion support
 
-## Source coverage
+Automated real PJM API ingestion requires `PJM_API_KEY` configured in `.env`.
 
-- PJM Day-Ahead Hourly LMP Data Miner feed (`da_hrl_lmps`)
-  - https://dataminer2.pjm.com/feed/da_hrl_lmps/definition
-  - https://dataminer2.pjm.com/feed/da_hrl_lmps
-- Open-Meteo Historical Weather API
-  - https://open-meteo.com/en/docs/historical-weather-api
-- Open-Meteo Historical Forecast API foundation
-  - https://open-meteo.com/en/docs/historical-forecast-api
+References:
+- Feed definition: https://dataminer2.pjm.com/feed/da_hrl_lmps/definition
+- API base: https://api.pjm.com/api/v1/
+- Getting started guide:
+  https://www.pjm.com/-/media/DotCom/etools/data-miner-2/data-miner-2-getting-started-guide.pdf
 
-## Baseline models
+### Required env keys
 
-- TFT baseline (probabilistic)
-- DeepAR benchmark (probabilistic)
+Add these to `.env`:
+- `PJM_API_KEY=`
+- `PJM_API_BASE_URL=https://api.pjm.com/api/v1`
+- `PJM_DATA_MINER_BASE_URL=https://dataminer2.pjm.com`
 
-Both baselines produce quantile outputs:
-- P10
-- P50
-- P90
+## Dry-run vs write commands
 
-## Synthetic smoke training vs real PJM training
-
-Synthetic fallback is supported for smoke/pipeline validation when real cached panel inputs are unavailable.
-
-Important: synthetic smoke metrics are not project performance claims and must not be presented as real PJM results.
-
-## Tech stack
-
-- Python 3.12 + uv (single managed environment)
-- PyTorch (CUDA 12.8 index)
-- NeuralForecast + Lightning
-- Pandas/Polars/PyArrow/Numpy/Scikit-learn
-- Optuna, MLflow, DVC
-- FastAPI + Uvicorn, Streamlit
-- Ruff, MyPy, PyTest
-
-## Data policy
-
-Raw PJM data and all PJM-derived artifacts must remain local and must not be committed to Git. This includes raw extracts, cache outputs, processed datasets, generated parquet/csv/json files, model checkpoints, experiment outputs, and report artifacts.
-
-Tracked repository directories under `data/` only contain `.gitkeep` placeholders.
-
-## Local setup
-
-From PowerShell:
+Dry probe:
 
 ```powershell
-cd "C:\Users\rohit\Documents\Personal Projects\LMP Probabilistic Forecaster"
-
-# Install uv if missing
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-
-uv python install 3.12
-uv python pin 3.12
-uv sync
+uv run python -m lmp_forecaster.cli inspect-pjm-api --zone AEP --start-date 2024-01-01 --end-date 2024-01-02
 ```
 
-Or use helper scripts:
+Dry backfill plan:
 
 ```powershell
-./scripts/bootstrap.ps1
-./scripts/build_panel_smoke.ps1
-./scripts/train_baseline_smoke.ps1
+uv run python -m lmp_forecaster.cli pull-real-pjm-lmp --zone AEP --start-date 2024-01-01 --end-date 2024-01-31
 ```
 
-## Dry-run commands
+Write 30-day pull:
 
 ```powershell
-uv run python -m lmp_forecaster.cli build-single-zone-panel --zone AEP
-uv run python -m lmp_forecaster.cli build-single-zone-panel --zone AEP --allow-synthetic-lmp --allow-synthetic-weather
-uv run python -m lmp_forecaster.cli train-single-zone-baselines --zone AEP
-uv run python -m lmp_forecaster.cli train-single-zone-baselines --zone AEP --allow-synthetic-panel --build-panel-if-missing
+uv run python -m lmp_forecaster.cli pull-real-pjm-lmp --zone AEP --start-date 2024-01-01 --end-date 2024-01-31 --write
 ```
 
-## Smoke write command
+Write one-year pull:
 
 ```powershell
-uv run python -m lmp_forecaster.cli train-single-zone-baselines --zone AEP --allow-synthetic-panel --build-panel-if-missing --write
+uv run python -m lmp_forecaster.cli pull-real-pjm-lmp --zone AEP --one-year --write
 ```
 
-## Expected artifact locations
+Workflow recommendation: run 30-day first, then one-year.
 
-- panel parquet: `data/processed/panel/single_zone/`
-- forecast parquet: `data/cache/forecasts/`
-- metrics/report JSON/CSV: `data/cache/reports/`
-- baseline artifacts: `artifacts/baselines/`
+## Data privacy policy reminder
 
-All are ignored by Git.
+Raw PJM and all derived outputs are private local artifacts and are ignored by Git:
+- `data/raw/**`
+- `data/cache/**`
+- `data/processed/**`
+- `artifacts/`
+- `lightning_logs/`
+- `mlruns/`
 
-## Warning on smoke metrics
+## Troubleshooting
 
-Metrics produced from synthetic panels are smoke-test diagnostics only. They are not final project results.
+- Missing `PJM_API_KEY`:
+  - set key in `.env`, rerun with `--write`
+- 401/403 failures:
+  - verify key validity/subscription scope
+- PJM schema changes:
+  - update normalization mapping in `src/lmp_forecaster/data/pjm_api.py`
+- Rate limits:
+  - reduce request cadence / chunk size
+- Empty AEP results:
+  - verify date range and filter behavior
+- DST row differences:
+  - expected for spring/fall transitions; inspect quality report
 
-## Test and quality checks
+## Quality gates
 
 ```powershell
 uv run ruff check .
@@ -116,19 +92,6 @@ uv run mypy src
 uv run pytest -q
 ```
 
-## Troubleshooting
+## Next step
 
-- PJM endpoint/query format changed:
-  - Update request builder in `src/lmp_forecaster/data/pjm_lmp.py` (`build_day_ahead_lmp_request`).
-- NeuralForecast API/version mismatches:
-  - Inspect installed signatures and adapt constructor args in `src/lmp_forecaster/models/baselines.py`.
-- Rate limits / transient network failures:
-  - Adjust retry/backoff in `src/lmp_forecaster/data/http_client.py`.
-- Open-Meteo parameter changes:
-  - Update request builders in `src/lmp_forecaster/data/openmeteo_weather.py`.
-- Windows `PYTHONHOME` contamination:
-  - Clear `PYTHONHOME` and `PYTHONPATH` before `uv run ...`.
-
-## Next implementation step
-
-Fix PJM live endpoint/query format and connect real cached AEP LMP data into the panel/training path.
+Build real AEP panel from cached real PJM LMP + weather and run real TFT/DeepAR baseline training.

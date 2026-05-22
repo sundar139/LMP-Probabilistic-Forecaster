@@ -23,6 +23,19 @@ from lmp_forecaster.data.openmeteo_weather import (
     pull_historical_forecast_smoke,
     pull_historical_weather_smoke,
 )
+from lmp_forecaster.data.pjm_api import (
+    build_day_ahead_lmp_params,
+    build_pjm_api_headers,
+    fetch_pjm_json_page,
+    normalize_da_lmp_response,
+    redact_headers,
+    resolve_pjm_api_config,
+)
+from lmp_forecaster.data.pjm_backfill import (
+    PjmBackfillConfig,
+    plan_backfill_chunks,
+    run_da_lmp_backfill,
+)
 from lmp_forecaster.data.pjm_lmp import PjmLmpRequestConfig, pull_pjm_lmp_smoke
 from lmp_forecaster.data.source_registry import load_source_registry
 from lmp_forecaster.data.synthetic_panel import SyntheticPanelConfig, make_synthetic_panel
@@ -56,6 +69,18 @@ def _parse_iso_date_option(value: str | None, *, option_name: str) -> date | Non
         raise typer.BadParameter(
             f"Invalid {option_name} date '{value}'. Expected YYYY-MM-DD."
         ) from exc
+
+
+def _resolve_real_pjm_window(
+    one_year: bool,
+    start_date: date | None,
+    end_date: date | None,
+) -> tuple[date, date]:
+    if start_date and end_date:
+        return start_date, end_date
+    if one_year:
+        return date(2024, 1, 1), date(2024, 12, 31)
+    return date(2024, 1, 1), date(2024, 1, 31)
 
 
 @app.command("show-config")
@@ -441,6 +466,120 @@ def train_single_zone_baselines_command(
     print(f"Metrics JSON: {result['metrics_json']}")
     print(f"Metrics CSV: {result['metrics_csv']}")
     print(f"Training report: {result['training_report_json']}")
+
+
+@app.command("inspect-pjm-api")
+def inspect_pjm_api_command(
+    zone: Annotated[str, typer.Option(help="Zone code, defaults to AEP.")] = "AEP",
+    start_date: Annotated[
+        str | None,
+        typer.Option(help="Inclusive start date (YYYY-MM-DD)."),
+    ] = None,
+    end_date: Annotated[
+        str | None,
+        typer.Option(help="Inclusive end date (YYYY-MM-DD)."),
+    ] = None,
+    row_count: Annotated[int, typer.Option(min=1, max=1000)] = 10,
+    require_key: Annotated[
+        bool,
+        typer.Option(help="Exit non-zero when PJM_API_KEY is missing."),
+    ] = False,
+) -> None:
+    """Probe PJM API endpoint/params and print redacted request diagnostics."""
+    cfg = resolve_pjm_api_config()
+    parsed_start = _parse_iso_date_option(start_date, option_name="--start-date")
+    parsed_end = _parse_iso_date_option(end_date, option_name="--end-date")
+    start, end = _resolve_real_pjm_window(False, parsed_start, parsed_end)
+
+    print("[bold]PJM API inspect[/bold]")
+    print(f"Endpoint: {cfg.api_base_url.rstrip('/')}/da_hrl_lmps")
+    print(f"Zone: {zone.upper()}")
+
+    if not cfg.api_key:
+        print("PJM_API_KEY not configured. Add PJM_API_KEY to .env for live API probes.")
+        if require_key:
+            raise typer.Exit(code=2)
+        return
+
+    params = build_day_ahead_lmp_params(
+        start=start,
+        end=end,
+        zone=zone.upper(),
+        start_row=1,
+        row_count=row_count,
+    )
+    headers = redact_headers(build_pjm_api_headers(cfg))
+    print(f"Headers: {headers}")
+    print(f"Params: {params}")
+
+    payload = fetch_pjm_json_page(config=cfg, endpoint="da_hrl_lmps", params=params)
+    normalized = normalize_da_lmp_response(payload, zone=zone.upper(), timezone=cfg.timezone)
+
+    if isinstance(payload, dict):
+        print(f"Response keys: {sorted(payload.keys())}")
+    else:
+        print("Response keys: <list payload>")
+    print(f"Normalized columns: {list(normalized.columns)}")
+    print(f"Normalized rows: {len(normalized)}")
+
+
+@app.command("pull-real-pjm-lmp")
+def pull_real_pjm_lmp_command(
+    zone: Annotated[str, typer.Option(help="Zone code, defaults to AEP.")] = "AEP",
+    start_date: Annotated[
+        str | None,
+        typer.Option(help="Inclusive start date (YYYY-MM-DD)."),
+    ] = None,
+    end_date: Annotated[
+        str | None,
+        typer.Option(help="Inclusive end date (YYYY-MM-DD)."),
+    ] = None,
+    chunk_days: Annotated[int, typer.Option(min=1, max=90)] = 31,
+    row_count: Annotated[int, typer.Option(min=100, max=50000)] = 50000,
+    write: Annotated[bool, typer.Option(help="Execute pull and write outputs.")] = False,
+    overwrite: Annotated[bool, typer.Option(help="Overwrite existing local outputs.")] = False,
+    one_year: Annotated[bool, typer.Option(help="Use default full-year date window.")] = False,
+) -> None:
+    """Backfill real PJM DA LMP for a single zone into ignored local cache paths."""
+    parsed_start = _parse_iso_date_option(start_date, option_name="--start-date")
+    parsed_end = _parse_iso_date_option(end_date, option_name="--end-date")
+    start, end = _resolve_real_pjm_window(one_year, parsed_start, parsed_end)
+
+    backfill_cfg = PjmBackfillConfig(
+        zone=zone.upper(),
+        start_date=start,
+        end_date=end,
+        chunk_days=chunk_days,
+        row_count=row_count,
+        overwrite=overwrite,
+        dry_run=not write,
+    )
+    chunks = plan_backfill_chunks(backfill_cfg)
+
+    print("[bold]Real PJM AEP pull[/bold]")
+    print(f"Zone: {backfill_cfg.zone}")
+    print(f"Date window: {start} -> {end}")
+    print(f"Chunks planned: {len(chunks)}")
+    print(f"Chunk days: {chunk_days}")
+    print(f"row_count: {row_count}")
+
+    if not write:
+        print("Dry-run only. Re-run with --write to pull and persist real data.")
+        return
+
+    api_cfg = resolve_pjm_api_config()
+    if not api_cfg.api_key:
+        print(
+            "PJM_API_KEY is required for automated Data Miner API ingestion. "
+            "Add it to .env or use dry-run mode."
+        )
+        raise typer.Exit(code=2)
+
+    result = run_da_lmp_backfill(backfill_cfg)
+    print(f"Raw outputs: {[str(p) for p in result.raw_paths]}")
+    print(f"Normalized outputs: {[str(p) for p in result.normalized_paths]}")
+    print(f"Quality report: {result.quality_report_path}")
+    print(f"Rows pulled: {result.combined_rows}")
 
 
 if __name__ == "__main__":

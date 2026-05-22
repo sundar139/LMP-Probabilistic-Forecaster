@@ -45,6 +45,11 @@ class AppSettings(BaseSettings):
     input_size: int = 168
     quantiles: list[float] = Field(default_factory=lambda: [0.1, 0.5, 0.9])
     default_zone: str = "AEP"
+    pjm_api_key: str | None = None
+    pjm_api_base_url: str = "https://api.pjm.com/api/v1"
+    pjm_data_miner_base_url: str = "https://dataminer2.pjm.com"
+    pjm_max_connections_per_minute: int = 5
+    pjm_timeout_seconds: float = 30.0
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
