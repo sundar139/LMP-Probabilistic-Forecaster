@@ -40,9 +40,20 @@ from lmp_forecaster.data.pjm_backfill import (
     run_da_lmp_backfill,
 )
 from lmp_forecaster.data.pjm_lmp import PjmLmpRequestConfig, pull_pjm_lmp_smoke
+from lmp_forecaster.data.real_cache_discovery import (
+    locate_latest_lmp_cache,
+    locate_latest_lmp_quality_report,
+    locate_latest_weather_cache,
+    locate_latest_weather_quality_report,
+)
 from lmp_forecaster.data.source_registry import load_source_registry
 from lmp_forecaster.data.synthetic_panel import SyntheticPanelConfig, make_synthetic_panel
+from lmp_forecaster.data.weather_backfill import pull_real_weather
 from lmp_forecaster.data.zones import get_zone, load_zone_registry
+from lmp_forecaster.eval.data_quality import (
+    build_weather_quality_report,
+    write_weather_quality_report,
+)
 from lmp_forecaster.eval.panel_report import build_panel_summary, write_panel_summary
 from lmp_forecaster.models.baselines import (
     BaselineTrainingConfig,
@@ -215,6 +226,74 @@ def pull_weather_smoke_command(
         print("Dry-run only. Re-run with --write to persist parquet output.")
 
 
+@app.command("pull-real-weather")
+def pull_real_weather_command(
+    zone: Annotated[str, typer.Option(help="Zone code, defaults to AEP.")] = "AEP",
+    start_date: Annotated[
+        str | None,
+        typer.Option(help="Inclusive start date (YYYY-MM-DD)."),
+    ] = None,
+    end_date: Annotated[
+        str | None,
+        typer.Option(help="Inclusive end date (YYYY-MM-DD)."),
+    ] = None,
+    write: Annotated[
+        bool,
+        typer.Option(help="Write normalized weather cache and quality report when set."),
+    ] = False,
+    overwrite: Annotated[
+        bool,
+        typer.Option(help="Overwrite existing normalized weather cache path when set."),
+    ] = False,
+) -> None:
+    """Pull real Open-Meteo hourly weather for a zone/date window."""
+    zone_meta = get_zone(zone)
+    parsed_start = _parse_iso_date_option(start_date, option_name="--start-date")
+    parsed_end = _parse_iso_date_option(end_date, option_name="--end-date")
+    start = parsed_start or date(2024, 1, 1)
+    end = parsed_end or date(2024, 12, 31)
+
+    print("[bold]Real weather pull[/bold]")
+    print(f"Zone: {zone_meta.zone}")
+    print(f"Date window: {start} -> {end}")
+    print(f"Coordinates: lat={zone_meta.latitude}, lon={zone_meta.longitude}")
+
+    if not write:
+        planned = locate_latest_weather_cache(
+            zone=zone_meta.zone,
+            start_date=start.isoformat(),
+            end_date=end.isoformat(),
+        )
+        if planned is not None:
+            print(f"Existing cache candidate: {planned.path}")
+            print(f"Existing cache rows: {planned.row_count}")
+        else:
+            print("No existing full-window weather cache found.")
+        print("Dry-run only. Re-run with --write to persist weather cache/report.")
+        return
+
+    result = pull_real_weather(
+        zone=zone_meta.zone,
+        latitude=zone_meta.latitude,
+        longitude=zone_meta.longitude,
+        start_date=start,
+        end_date=end,
+        write=True,
+        overwrite=overwrite,
+    )
+    quality_path = result.quality_report_path
+    if quality_path is None:
+        quality = build_weather_quality_report(result.normalized, zone=zone_meta.zone)
+        quality_path = write_weather_quality_report(quality)
+    else:
+        quality = build_weather_quality_report(result.normalized, zone=zone_meta.zone)
+
+    print(f"Weather cache path: {result.output_path}")
+    print(f"Rows: {len(result.normalized)}")
+    print(f"Weather quality report: {quality_path}")
+    print(f"Data source label: {quality['data_source_label']}")
+
+
 @app.command("pull-historical-forecast-smoke")
 def pull_historical_forecast_smoke_command(
     zone: Annotated[str, typer.Option(help="Zone code, defaults to AEP.")] = "AEP",
@@ -334,6 +413,7 @@ def build_single_zone_panel_command(
         end_date=parsed_end,
         allow_synthetic_lmp=allow_synthetic_lmp,
         allow_synthetic_weather=allow_synthetic_weather,
+        require_real_sources=not (allow_synthetic_lmp or allow_synthetic_weather),
     )
 
     paths = get_project_paths()
@@ -350,6 +430,40 @@ def build_single_zone_panel_command(
     print(f"Output path: {planned_output}")
     print(f"allow_synthetic_lmp={cfg.allow_synthetic_lmp}")
     print(f"allow_synthetic_weather={cfg.allow_synthetic_weather}")
+
+    if cfg.start_date is not None and cfg.end_date is not None:
+        discovered_lmp = locate_latest_lmp_cache(
+            zone=cfg.zone,
+            start_date=cfg.start_date.isoformat(),
+            end_date=cfg.end_date.isoformat(),
+        )
+        print(f"Discovered LMP chunks: {len(discovered_lmp)}")
+        if discovered_lmp:
+            print(f"First LMP chunk: {discovered_lmp[0]}")
+            print(f"Last LMP chunk: {discovered_lmp[-1]}")
+            lmp_report = locate_latest_lmp_quality_report(
+                zone=cfg.zone,
+                start_date=cfg.start_date.isoformat(),
+                end_date=cfg.end_date.isoformat(),
+            )
+            if lmp_report is not None:
+                print(f"LMP quality report: {lmp_report}")
+
+        discovered_weather = locate_latest_weather_cache(
+            zone=cfg.zone,
+            start_date=cfg.start_date.isoformat(),
+            end_date=cfg.end_date.isoformat(),
+        )
+        if discovered_weather is not None:
+            print(f"Discovered weather cache: {discovered_weather.path}")
+            print(f"Discovered weather rows: {discovered_weather.row_count}")
+            weather_report = locate_latest_weather_quality_report(
+                zone=cfg.zone,
+                start_date=cfg.start_date.isoformat(),
+                end_date=cfg.end_date.isoformat(),
+            )
+            if weather_report is not None:
+                print(f"Weather quality report: {weather_report}")
 
     if cfg.allow_synthetic_lmp or cfg.allow_synthetic_weather:
         print(
@@ -368,6 +482,7 @@ def build_single_zone_panel_command(
     print(f"Wrote panel: {written}")
     print(f"Rows: {stats['rows']}")
     print(f"Range: {stats['start_ds']} -> {stats['end_ds']}")
+    print(f"Source labels: {sorted(panel['source_label'].astype(str).unique().tolist())}")
 
     if summary:
         report = build_panel_summary(panel, zone=cfg.zone)
@@ -464,6 +579,7 @@ def train_single_zone_baselines_command(
             "be presented as PJM performance."
         )
 
+    print(f"Data source label: {result['data_source_label']}")
     print(f"Accelerator: {result['accelerator']} ({result['device_name']})")
     print(f"Forecast outputs: {result['forecasts']}")
     print(f"Metrics JSON: {result['metrics_json']}")

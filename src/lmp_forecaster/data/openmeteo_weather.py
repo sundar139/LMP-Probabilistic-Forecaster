@@ -95,6 +95,8 @@ def normalize_openmeteo_hourly(payload: dict[str, Any], *, source: str) -> pd.Da
         raise ValueError("Open-Meteo payload missing hourly.time array.")
 
     frame = pd.DataFrame({"ds": pd.to_datetime(time_values, errors="coerce", utc=False)})
+    if frame["ds"].isna().any():
+        raise ValueError("Open-Meteo payload contains invalid hourly.time values.")
 
     for variable in DEFAULT_HOURLY_VARIABLES:
         values = hourly.get(variable)
@@ -109,11 +111,31 @@ def normalize_openmeteo_hourly(payload: dict[str, Any], *, source: str) -> pd.Da
     pulled_at = pd.Timestamp(datetime.now(UTC))
 
     if isinstance(timezone, str):
-        frame["ds"] = frame["ds"].dt.tz_localize(
-            timezone,
-            ambiguous="NaT",
-            nonexistent="shift_forward",
-        )
+        if frame["ds"].dt.tz is None:
+            try:
+                frame["ds"] = frame["ds"].dt.tz_localize(
+                    timezone,
+                    ambiguous="infer",
+                    nonexistent="shift_forward",
+                )
+            except Exception:
+                frame["ds"] = frame["ds"].dt.tz_localize(
+                    timezone,
+                    ambiguous=False,
+                    nonexistent="shift_forward",
+                )
+        else:
+            frame["ds"] = frame["ds"].dt.tz_convert(timezone)
+
+        utc_deltas = frame["ds"].dt.tz_convert("UTC").diff().dropna()
+        if not utc_deltas.empty and (utc_deltas != pd.Timedelta(hours=1)).any():
+            frame["ds"] = pd.Series(
+                pd.date_range(start=frame["ds"].iloc[0], periods=len(frame), freq="h"),
+                index=frame.index,
+            )
+
+    if frame["ds"].isna().any():
+        raise ValueError("Open-Meteo payload normalization produced null ds values.")
 
     frame["latitude"] = float(latitude) if latitude is not None else pd.NA
     frame["longitude"] = float(longitude) if longitude is not None else pd.NA

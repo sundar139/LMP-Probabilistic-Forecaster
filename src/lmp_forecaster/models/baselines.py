@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,6 +25,11 @@ from lmp_forecaster.data.build_panel import (
 )
 from lmp_forecaster.data.splits import TimeSplitConfig, split_single_series_panel
 from lmp_forecaster.eval.metrics import evaluate_probabilistic_forecast
+from lmp_forecaster.eval.results_report import (
+    summarize_baseline_results,
+    write_baseline_results_json,
+    write_baseline_results_markdown,
+)
 from lmp_forecaster.models.forecast_schema import (
     normalize_neuralforecast_output,
     validate_quantile_forecast,
@@ -189,6 +195,9 @@ def _fit_predict_model(
     history_df: pd.DataFrame,
     test_df: pd.DataFrame,
     cfg: BaselineTrainingConfig,
+    *,
+    data_source_label: str,
+    zone: str,
 ) -> pd.DataFrame:
     nf = NeuralForecast(models=[model], freq="h")
     nf.fit(df=train_df, val_size=0)
@@ -211,7 +220,13 @@ def _fit_predict_model(
         remaining = remaining.iloc[chunk:].reset_index(drop=True)
 
     pred = pd.concat(pred_chunks, ignore_index=True)
-    norm = normalize_neuralforecast_output(pred, model=model_name, actuals=test_df)
+    norm = normalize_neuralforecast_output(
+        pred,
+        model=model_name,
+        actuals=test_df,
+        data_source_label=data_source_label,
+        zone=zone,
+    )
     validate_quantile_forecast(norm)
     return norm
 
@@ -222,6 +237,8 @@ def train_tft_baseline(
     test_df: pd.DataFrame,
     cfg: BaselineTrainingConfig,
     accel: AcceleratorInfo,
+    *,
+    data_source_label: str,
 ) -> pd.DataFrame:
     """Train TFT baseline and return normalized quantile forecast."""
     root = get_project_paths().root
@@ -244,7 +261,16 @@ def train_tft_baseline(
         dataloader_kwargs={"num_workers": cfg.num_workers},
         **accel.trainer_kwargs,
     )
-    return _fit_predict_model("TFT", model, train_df, history_df, test_df, cfg)
+    return _fit_predict_model(
+        "TFT",
+        model,
+        train_df,
+        history_df,
+        test_df,
+        cfg,
+        data_source_label=data_source_label,
+        zone=cfg.zone,
+    )
 
 
 def train_deepar_baseline(
@@ -253,6 +279,8 @@ def train_deepar_baseline(
     test_df: pd.DataFrame,
     cfg: BaselineTrainingConfig,
     accel: AcceleratorInfo,
+    *,
+    data_source_label: str,
 ) -> pd.DataFrame:
     """Train DeepAR benchmark and return normalized quantile forecast."""
     root = get_project_paths().root
@@ -281,7 +309,16 @@ def train_deepar_baseline(
         dataloader_kwargs={"num_workers": cfg.num_workers},
         **accel.trainer_kwargs,
     )
-    return _fit_predict_model("DeepAR", model, train_df, history_df, test_df, cfg)
+    return _fit_predict_model(
+        "DeepAR",
+        model,
+        train_df,
+        history_df,
+        test_df,
+        cfg,
+        data_source_label=data_source_label,
+        zone=cfg.zone,
+    )
 
 
 def train_single_zone_baselines(cfg: BaselineTrainingConfig) -> dict[str, Any]:
@@ -290,6 +327,7 @@ def train_single_zone_baselines(cfg: BaselineTrainingConfig) -> dict[str, Any]:
     np.random.seed(cfg.random_seed)
 
     panel, source_label, panel_path = _load_or_build_panel(cfg)
+    train_start = time.perf_counter()
     try:
         validate_panel_schema(panel, PanelBuildConfig(zone=cfg.zone))
     except ValueError as exc:
@@ -332,8 +370,21 @@ def train_single_zone_baselines(cfg: BaselineTrainingConfig) -> dict[str, Any]:
         "artifact_dir": str(artifact_dir),
     }
 
+    if source_label != "real" and not cfg.allow_synthetic_panel:
+        raise ValueError(
+            "Training requires real panel data_source_label=real "
+            "unless --allow-synthetic-panel is set."
+        )
+
     if not cfg.skip_tft:
-        tft_fcst = train_tft_baseline(train_df, history_df, test_df, cfg, accel)
+        tft_fcst = train_tft_baseline(
+            train_df,
+            history_df,
+            test_df,
+            cfg,
+            accel,
+            data_source_label=source_label,
+        )
         tft_path = forecast_dir / f"tft_forecast_{cfg.zone}.parquet"
         tft_fcst.to_parquet(tft_path, index=False)
         (artifact_dir / f"tft_artifact_{cfg.zone}.json").write_text(
@@ -357,7 +408,14 @@ def train_single_zone_baselines(cfg: BaselineTrainingConfig) -> dict[str, Any]:
         )
 
     if not cfg.skip_deepar:
-        dr_fcst = train_deepar_baseline(train_df, history_df, test_df, cfg, accel)
+        dr_fcst = train_deepar_baseline(
+            train_df,
+            history_df,
+            test_df,
+            cfg,
+            accel,
+            data_source_label=source_label,
+        )
         dr_path = forecast_dir / f"deepar_forecast_{cfg.zone}.parquet"
         dr_fcst.to_parquet(dr_path, index=False)
         (artifact_dir / f"deepar_artifact_{cfg.zone}.json").write_text(
@@ -395,6 +453,12 @@ def train_single_zone_baselines(cfg: BaselineTrainingConfig) -> dict[str, Any]:
         pd.DataFrame(list(outputs["metrics"].values())).to_csv(metrics_csv, index=False)
 
     train_report = report_dir / f"baseline_training_report_{cfg.zone}.json"
+    training_duration_seconds = float(time.perf_counter() - train_start)
+    split_sizes = {
+        "train": len(train_df),
+        "val": len(val_df),
+        "test": len(test_df),
+    }
     train_report.write_text(
         json.dumps(
             {
@@ -402,22 +466,38 @@ def train_single_zone_baselines(cfg: BaselineTrainingConfig) -> dict[str, Any]:
                 "zone": cfg.zone,
                 "panel_path": str(panel_path),
                 "source_label": source_label,
-                "split_sizes": {
-                    "train": len(train_df),
-                    "val": len(val_df),
-                    "test": len(test_df),
-                },
+                "split_sizes": split_sizes,
                 "accelerator": {"kind": accel.kind, "device_name": accel.device_name},
                 "forecasts": outputs["forecasts"],
                 "metrics_json": str(metrics_json),
                 "metrics_csv": str(metrics_csv),
+                "training_duration_seconds": training_duration_seconds,
+                "caveat": "first real single-zone untuned baseline",
             },
             indent=2,
         ),
         encoding="utf-8",
     )
 
+    results_summary = summarize_baseline_results(
+        zone=cfg.zone,
+        data_source_label=source_label,
+        panel=panel,
+        split_sizes=split_sizes,
+        metrics=outputs["metrics"],
+        forecasts=outputs["forecasts"],
+        accelerator_kind=accel.kind,
+        accelerator_device_name=accel.device_name,
+        training_duration_seconds=training_duration_seconds,
+    )
+    results_json_path = write_baseline_results_json(results_summary)
+    results_markdown_path = write_baseline_results_markdown(results_summary)
+
     outputs["metrics_json"] = str(metrics_json)
     outputs["metrics_csv"] = str(metrics_csv)
     outputs["training_report_json"] = str(train_report)
+    outputs["results_summary_json"] = str(results_json_path)
+    outputs["results_summary_markdown"] = str(results_markdown_path)
+    outputs["split_sizes"] = split_sizes
+    outputs["training_duration_seconds"] = training_duration_seconds
     return outputs

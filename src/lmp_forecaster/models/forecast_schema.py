@@ -40,6 +40,8 @@ def normalize_neuralforecast_output(
     *,
     model: str,
     actuals: pd.DataFrame | None = None,
+    data_source_label: str | None = None,
+    zone: str | None = None,
 ) -> pd.DataFrame:
     """Normalize forecast output to standard quantile schema."""
     required = ["unique_id", "ds"]
@@ -71,8 +73,21 @@ def normalize_neuralforecast_output(
 
     out["model"] = model
     out["generated_at"] = datetime.now(UTC)
+    out["data_source_label"] = data_source_label if data_source_label is not None else pd.NA
+    out["zone"] = zone if zone is not None else pd.NA
 
-    ordered = ["unique_id", "ds", "y", "p10", "p50", "p90", "model", "generated_at"]
+    ordered = [
+        "unique_id",
+        "ds",
+        "y",
+        "p10",
+        "p50",
+        "p90",
+        "model",
+        "generated_at",
+        "data_source_label",
+        "zone",
+    ]
     for col in ordered:
         if col not in out.columns:
             out[col] = pd.NA
@@ -82,13 +97,35 @@ def normalize_neuralforecast_output(
 
 def validate_quantile_forecast(frame: pd.DataFrame) -> None:
     """Validate quantile forecast schema and monotonic quantile ordering."""
-    required = ["unique_id", "ds", "p10", "p50", "p90"]
+    required = [
+        "unique_id",
+        "ds",
+        "p10",
+        "p50",
+        "p90",
+        "model",
+        "generated_at",
+        "data_source_label",
+        "zone",
+    ]
     missing = [c for c in required if c not in frame.columns]
     if missing:
         raise ValueError(f"Missing required forecast columns: {missing}")
 
     if frame["unique_id"].isna().any():
         raise ValueError("Forecast unique_id contains null values.")
+
+    if frame["model"].isna().any():
+        raise ValueError("Forecast model contains null values.")
+
+    if frame["generated_at"].isna().any():
+        raise ValueError("Forecast generated_at contains null values.")
+
+    if frame["data_source_label"].isna().any():
+        raise ValueError("Forecast data_source_label contains null values.")
+
+    if frame["zone"].isna().any():
+        raise ValueError("Forecast zone contains null values.")
 
     if pd.to_datetime(frame["ds"], errors="coerce", utc=False).isna().any():
         raise ValueError("Forecast ds contains non-datetime values.")

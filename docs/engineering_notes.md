@@ -1,6 +1,44 @@
 # Engineering notes
 
-## 2026-05-22 — Live PJM one-year backfill rate/partition tuning
+## 2026-05-22 — Step 6 continuation stabilization (lint/type/runtime/training)
+
+Mistake observed:
+- Interrupted continuation left multiple Ruff failures (imports/line-length/unused vars), plus runtime regressions in real cache discovery and DST handling.
+- Real panel build failed to consume full-year cached LMP when overlapping chunks existed.
+- CLI training command printed successful outputs but shell return code surfaced as 127 on this host even when artifacts were written.
+
+Root cause:
+1. Partially applied Step 6 edits introduced formatting/import drift and dead assignments.
+2. Cache-chunk selector prioritized shortest chunk first, which could choose stale overlap fragments and break contiguous year coverage.
+3. Open-Meteo normalization localized all timestamps with strict ambiguity handling without fallback and could fail on DST-boundary edge cases.
+4. Forecast schema lacked required `zone` and `data_source_label` columns for final real-baseline contract.
+5. Host shell/runtime wrapper intermittently emitted return code 127 after successful CLI completion (post-run environment quirk), not a model-training failure.
+
+Fix implemented:
+1. Resolved all Ruff issues across CLI, panel builder, cache discovery, weather backfill, results reporting, baselines, and new tests.
+2. Updated LMP cache discovery selection to prefer freshest chunk by mtime while still ensuring day-by-day contiguous coverage.
+3. Added DST-safe Open-Meteo normalization fallback (`ambiguous=False`) plus invalid-time guard; added regression tests.
+4. Tightened panel ingestion to validate raw LMP frame before coercion and expanded regression tests.
+5. Extended forecast schema normalization/validation to require and populate `data_source_label` and `zone`; passed through from baseline training pipeline.
+6. Re-ran real weather pull, real panel build, and real TFT/DeepAR training; validated forecasts + metrics with `data_source_label=real`.
+
+Regression protection:
+- Added/updated tests:
+  - `tests/test_real_cache_discovery.py`
+  - `tests/test_real_panel_building.py`
+  - `tests/test_weather_backfill.py`
+  - `tests/test_openmeteo_weather.py`
+  - `tests/test_build_panel.py`
+  - `tests/test_forecast_schema.py`
+  - `tests/test_results_report.py`
+- Quality gates passed after fixes: Ruff, mypy, pytest.
+
+Lesson learned:
+- For resumable yearly cache workflows, freshness-aware contiguous chunk selection is safer than shortest-span preference.
+- DST-localized weather timestamps need explicit fallback logic and regression tests.
+- Real-baseline contracts should enforce provenance fields (`zone`, `data_source_label`) directly in forecast schema validation.
+- On this Windows/MSYS host, treat CLI return code 127 as a potential post-run wrapper artifact when success evidence (reports/artifacts) is present; verify outputs directly.
+
 
 Mistake observed:
 - One-year pull with monthly-ish chunks initially failed.

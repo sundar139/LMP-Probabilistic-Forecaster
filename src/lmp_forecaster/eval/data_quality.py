@@ -11,6 +11,7 @@ import pandas as pd
 
 from lmp_forecaster.config.paths import get_project_paths
 from lmp_forecaster.data.validation import detect_dst_day_lengths
+from lmp_forecaster.features.weather import WEATHER_COLUMNS
 
 
 def build_lmp_quality_report(
@@ -94,5 +95,83 @@ def write_lmp_quality_report(report: dict[str, Any], output_dir: Path | None = N
     zone = str(report.get("zone", "unknown"))
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     path = target / f"lmp_quality_{zone}_{stamp}.json"
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return path
+
+
+def build_weather_quality_report(
+    frame: pd.DataFrame,
+    *,
+    zone: str,
+    source: str = "openmeteo_historical_weather",
+) -> dict[str, Any]:
+    required = ["ds", "timezone", "source"]
+    missing = [c for c in required if c not in frame.columns]
+    if missing:
+        raise ValueError(f"Weather quality input missing required columns: {missing}")
+
+    out = frame.copy()
+    out["ds"] = pd.to_datetime(out["ds"], errors="coerce", utc=False)
+    if out["ds"].isna().any():
+        raise ValueError("Weather quality input has invalid ds values.")
+
+    if out["ds"].dt.tz is None:
+        out["ds"] = out["ds"].dt.tz_localize(
+            "America/New_York",
+            ambiguous="infer",
+            nonexistent="shift_forward",
+        )
+    else:
+        out["ds"] = out["ds"].dt.tz_convert("America/New_York")
+
+    out = out.sort_values("ds").reset_index(drop=True)
+
+    duplicates = int(out.duplicated(subset=["ds"]).sum())
+    min_ds = out["ds"].min()
+    max_ds = out["ds"].max()
+    expected_hours = len(pd.date_range(min_ds, max_ds, freq="h")) if len(out) > 0 else 0
+    unique_hours = int(out.drop_duplicates(subset=["ds"]).shape[0])
+    missing_hours = int(max(0, expected_hours - unique_hours))
+
+    dst = [
+        {"day": d.day, "hours": d.hours}
+        for d in detect_dst_day_lengths(out["ds"], timezone="America/New_York")
+        if d.hours in {23, 25}
+    ]
+
+    missing_values = {
+        col: int(out[col].isna().sum()) if col in out.columns else len(out)
+        for col in WEATHER_COLUMNS
+    }
+
+    return {
+        "source": source,
+        "zone": zone,
+        "start_date": str(min_ds.date()) if len(out) else None,
+        "end_date": str(max_ds.date()) if len(out) else None,
+        "row_count": int(len(out)),
+        "expected_hour_count": int(expected_hours),
+        "missing_hour_count": missing_hours,
+        "duplicate_timestamp_count": duplicates,
+        "min_ds": str(min_ds) if len(out) else None,
+        "max_ds": str(max_ds) if len(out) else None,
+        "timezone": str(out["ds"].dt.tz),
+        "dst_day_lengths": dst,
+        "missing_values": missing_values,
+        "columns_observed": list(out.columns),
+        "generated_at": datetime.now(UTC).isoformat(),
+        "data_source_label": "real",
+        "source_label": "real/openmeteo",
+    }
+
+
+def write_weather_quality_report(report: dict[str, Any], output_dir: Path | None = None) -> Path:
+    root = get_project_paths().root
+    target = output_dir or (root / "data" / "cache" / "reports")
+    target.mkdir(parents=True, exist_ok=True)
+
+    zone = str(report.get("zone", "unknown"))
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    path = target / f"weather_quality_{zone}_{stamp}.json"
     path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     return path

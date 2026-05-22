@@ -11,7 +11,12 @@ import numpy as np
 import pandas as pd
 
 from lmp_forecaster.config.paths import get_project_paths
+from lmp_forecaster.data.real_cache_discovery import (
+    locate_latest_lmp_cache,
+    locate_latest_weather_cache,
+)
 from lmp_forecaster.data.synthetic_panel import SyntheticPanelConfig, make_synthetic_panel
+from lmp_forecaster.data.validation import validate_lmp_frame, validate_weather_frame
 from lmp_forecaster.features.calendar import add_calendar_features
 from lmp_forecaster.features.lags import (
     add_lag_features,
@@ -68,24 +73,35 @@ class PanelBuildConfig:
     allow_synthetic_weather: bool = False
     drop_warmup_rows: bool = True
     fill_weather_limit: int = 3
+    require_real_sources: bool = True
 
 
-def _default_lmp_cache_path(zone: str) -> Path:
-    root = get_project_paths().root
-    base = root / "data" / "cache" / "pjm" / "da_hrl_lmps"
-    matches = sorted(base.glob(f"*_{zone}.parquet")) if base.exists() else []
-    if matches:
-        return matches[-1]
-    return base / f"da_hrl_lmps_default_{zone}.parquet"
+def _read_lmp_from_path(path: Path, *, zone: str, timezone: str) -> pd.DataFrame:
+    frame = pd.read_parquet(path)
+    validate_lmp_frame(frame)
+    frame = _coerce_lmp_frame(frame, zone, timezone)
+    return frame
 
 
-def _default_weather_cache_path() -> Path:
-    root = get_project_paths().root
-    base = root / "data" / "cache" / "weather" / "openmeteo"
-    matches = sorted(base.glob("historical_weather_*.parquet")) if base.exists() else []
-    if matches:
-        return matches[-1]
-    return base / "historical_weather_default.parquet"
+def _default_lmp_cache_paths(config: PanelBuildConfig) -> list[Path]:
+    if config.start_date is None or config.end_date is None:
+        return []
+    return locate_latest_lmp_cache(
+        zone=config.zone,
+        start_date=config.start_date.isoformat(),
+        end_date=config.end_date.isoformat(),
+    )
+
+
+def _default_weather_cache_path(config: PanelBuildConfig) -> Path | None:
+    if config.start_date is None or config.end_date is None:
+        return None
+    hit = locate_latest_weather_cache(
+        zone=config.zone,
+        start_date=config.start_date.isoformat(),
+        end_date=config.end_date.isoformat(),
+    )
+    return hit.path if hit is not None else None
 
 
 def _coerce_lmp_frame(frame: pd.DataFrame, zone: str, timezone: str) -> pd.DataFrame:
@@ -146,14 +162,43 @@ def _synthetic_weather_from_lmp(lmp: pd.DataFrame) -> pd.DataFrame:
 
 def load_lmp_frame(config: PanelBuildConfig) -> tuple[pd.DataFrame, str]:
     """Load LMP data from cache or synthetic fallback."""
-    path = config.input_lmp_path or _default_lmp_cache_path(config.zone)
-    if path.exists():
-        frame = pd.read_parquet(path)
-        return _coerce_lmp_frame(frame, config.zone, config.timezone), "real"
+    if config.input_lmp_path is not None:
+        if config.input_lmp_path.is_dir():
+            files = sorted(config.input_lmp_path.glob("*.parquet"))
+            if not files:
+                raise FileNotFoundError(f"No LMP parquet files found in {config.input_lmp_path}")
+            frames = [
+                _read_lmp_from_path(
+                    p,
+                    zone=config.zone,
+                    timezone=config.timezone,
+                )
+                for p in files
+            ]
+            return pd.concat(frames, ignore_index=True), "real"
+        if config.input_lmp_path.exists():
+            return _read_lmp_from_path(
+                config.input_lmp_path,
+                zone=config.zone,
+                timezone=config.timezone,
+            ), "real"
+
+    candidate_paths = _default_lmp_cache_paths(config)
+    if candidate_paths:
+        frames = [
+            _read_lmp_from_path(
+                p,
+                zone=config.zone,
+                timezone=config.timezone,
+            )
+            for p in candidate_paths
+        ]
+        return pd.concat(frames, ignore_index=True), "real"
 
     if not config.allow_synthetic_lmp:
         raise FileNotFoundError(
-            f"No LMP parquet found at {path}. Use --allow-synthetic-lmp for smoke fallback."
+            f"Real {config.zone.upper()} LMP cache is missing. "
+            "Re-run Step 5B one-year backfill before Step 6."
         )
 
     synth = _synthetic_lmp(config.zone, config.timezone, config.min_history_hours + 72)
@@ -165,14 +210,24 @@ def load_weather_frame(
     lmp_frame: pd.DataFrame,
 ) -> tuple[pd.DataFrame, str]:
     """Load weather data from cache or synthetic fallback."""
-    path = config.input_weather_path or _default_weather_cache_path()
-    if path.exists():
-        weather = pd.read_parquet(path)
-        return normalize_weather_for_panel(weather, timezone=config.timezone), "real"
+    if config.input_weather_path is not None:
+        if config.input_weather_path.exists():
+            weather = pd.read_parquet(config.input_weather_path)
+            weather = normalize_weather_for_panel(weather, timezone=config.timezone)
+            validate_weather_frame(weather)
+            return weather, "real"
+    else:
+        path = _default_weather_cache_path(config)
+        if path is not None and path.exists():
+            weather = pd.read_parquet(path)
+            weather = normalize_weather_for_panel(weather, timezone=config.timezone)
+            validate_weather_frame(weather)
+            return weather, "real"
 
     if not config.allow_synthetic_weather:
         raise FileNotFoundError(
-            f"No weather parquet found at {path}. Use --allow-synthetic-weather for smoke fallback."
+            f"No weather parquet found for {config.zone.upper()} over requested window. "
+            "Run pull-real-weather before building the real panel."
         )
 
     synth = _synthetic_weather_from_lmp(lmp_frame)
@@ -292,6 +347,10 @@ def build_single_zone_panel(
         source_label = "mixed"
 
     panel["source_label"] = source_label
+    panel["data_source_label"] = source_label
+
+    if config.require_real_sources and source_label != "real":
+        raise ValueError("Real panel build requires real LMP and real weather sources.")
 
     validate_panel_schema(panel, config)
     return panel

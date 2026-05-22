@@ -10,6 +10,7 @@ import pytest
 from lmp_forecaster.data.build_panel import (
     PanelBuildConfig,
     build_single_zone_panel,
+    load_lmp_frame,
     validate_panel_schema,
 )
 
@@ -90,11 +91,29 @@ def test_builder_fails_without_lmp_when_synthetic_disabled(tmp_path: Path) -> No
         build_single_zone_panel(cfg)
 
 
+def test_load_lmp_frame_rejects_legacy_missing_market_column(tmp_path: Path) -> None:
+    chunk = tmp_path / "aep_da_lmp_2024-01-01_2024-01-01.parquet"
+    frame = pd.DataFrame(
+        {
+            "unique_id": ["AEP"],
+            "ds": [pd.Timestamp("2024-01-01 00:00:00", tz="America/New_York")],
+            "y": [10.0],
+        }
+    )
+    frame.to_parquet(chunk, index=False)
+
+    cfg = PanelBuildConfig(zone="AEP", input_lmp_path=chunk)
+
+    with pytest.raises(ValueError, match="Missing required column: market"):
+        load_lmp_frame(cfg)
+
+
 def test_synthetic_fallback_requires_explicit_flags() -> None:
     cfg = PanelBuildConfig(
         zone="AEP",
         allow_synthetic_lmp=True,
         allow_synthetic_weather=True,
+        require_real_sources=False,
     )
     panel = build_single_zone_panel(cfg)
     assert "source_label" in panel.columns
