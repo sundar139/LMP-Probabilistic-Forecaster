@@ -6,6 +6,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Annotated
 
+import pandas as pd
 import typer
 from rich import print
 
@@ -50,6 +51,13 @@ from lmp_forecaster.data.source_registry import load_source_registry
 from lmp_forecaster.data.synthetic_panel import SyntheticPanelConfig, make_synthetic_panel
 from lmp_forecaster.data.weather_backfill import pull_real_weather
 from lmp_forecaster.data.zones import get_zone, load_zone_registry
+from lmp_forecaster.eval.backtest import (
+    BacktestConfig,
+    make_rolling_origin_folds,
+    summarize_backtest_plan,
+    validate_backtest_folds,
+    write_backtest_plan,
+)
 from lmp_forecaster.eval.data_quality import (
     build_weather_quality_report,
     write_weather_quality_report,
@@ -525,6 +533,22 @@ def train_single_zone_baselines_command(
         bool,
         typer.Option(help="Skip DeepAR model training."),
     ] = False,
+    enable_tracking: Annotated[
+        bool,
+        typer.Option(help="Enable MLflow tracking for this training run."),
+    ] = False,
+    tracking_uri: Annotated[
+        str | None,
+        typer.Option(help="Optional MLflow tracking URI override."),
+    ] = None,
+    experiment_name: Annotated[
+        str | None,
+        typer.Option(help="Optional MLflow experiment name override."),
+    ] = None,
+    run_name: Annotated[
+        str | None,
+        typer.Option(help="Optional MLflow run name override."),
+    ] = None,
 ) -> None:
     """Train single-zone TFT/DeepAR baselines with probabilistic outputs."""
     cfg = load_training_config(zone.upper(), max_steps_smoke=max_steps_smoke)
@@ -538,6 +562,10 @@ def train_single_zone_baselines_command(
             "output_dir": output_dir,
             "skip_tft": skip_tft,
             "skip_deepar": skip_deepar,
+            "tracking_enabled": enable_tracking,
+            "tracking_uri": tracking_uri,
+            "tracking_experiment_name": experiment_name,
+            "tracking_run_name": run_name,
         }
     )
 
@@ -557,6 +585,12 @@ def train_single_zone_baselines_command(
         f"max_steps_smoke={cfg.max_steps_smoke}"
     )
     print(f"skip_tft={cfg.skip_tft}, skip_deepar={cfg.skip_deepar}")
+    print(
+        "tracking_enabled="
+        f"{cfg.tracking_enabled}, "
+        f"tracking_uri={cfg.tracking_uri or '(config default)'}, "
+        f"experiment_name={cfg.tracking_experiment_name or '(config default)'}"
+    )
     print(f"Forecast cache path: {paths.root / 'data' / 'cache' / 'forecasts'}")
     print(f"Report cache path: {paths.root / 'data' / 'cache' / 'reports'}")
     print(f"Artifact path: {cfg.output_dir or (paths.root / 'artifacts' / 'baselines')}")
@@ -585,6 +619,83 @@ def train_single_zone_baselines_command(
     print(f"Metrics JSON: {result['metrics_json']}")
     print(f"Metrics CSV: {result['metrics_csv']}")
     print(f"Training report: {result['training_report_json']}")
+    if "tracking" in result:
+        print(f"Tracking status: {result['tracking']}")
+
+
+@app.command("plan-rolling-backtest")
+def plan_rolling_backtest_command(
+    zone: Annotated[str, typer.Option(help="Zone code, defaults to AEP.")] = "AEP",
+    panel_path: Annotated[
+        Path,
+        typer.Option(help="Panel parquet path for fold planning."),
+    ] = Path("data/processed/panel/single_zone/AEP_panel.parquet"),
+    folds: Annotated[int, typer.Option(min=1, help="Number of folds.")] = 3,
+    horizon_hours: Annotated[int, typer.Option(min=1, help="Test horizon per fold in hours.")] = 24,
+    min_train_hours: Annotated[
+        int,
+        typer.Option(min=24, help="Minimum train history per fold in hours."),
+    ] = 2160,
+    window_mode: Annotated[
+        str,
+        typer.Option(help="Train window mode: expanding or rolling."),
+    ] = "expanding",
+    write: Annotated[
+        bool,
+        typer.Option(help="Write backtest plan reports under data/cache/reports when set."),
+    ] = False,
+) -> None:
+    """Plan rolling-origin backtest folds without running expensive model training."""
+    paths = get_project_paths()
+    resolved_panel = panel_path if panel_path.is_absolute() else (paths.root / panel_path)
+
+    print("[bold]Rolling-origin backtest planning[/bold]")
+    print(f"Zone: {zone.upper()}")
+    print(f"Panel path: {resolved_panel}")
+    print(f"folds={folds}, horizon_hours={horizon_hours}, min_train_hours={min_train_hours}")
+    print(f"window_mode={window_mode}")
+
+    if not resolved_panel.exists():
+        raise typer.BadParameter(f"Panel path does not exist: {resolved_panel}")
+
+    panel = pd.read_parquet(resolved_panel)
+    cfg = BacktestConfig(
+        zone=zone.upper(),
+        horizon_hours=horizon_hours,
+        folds=folds,
+        min_train_hours=min_train_hours,
+        window_mode=window_mode,
+    )
+    fold_plan = make_rolling_origin_folds(panel, cfg)
+    validate_backtest_folds(fold_plan)
+
+    reports_root = paths.root / "data" / "cache" / "reports"
+    planned_output = reports_root / f"backtest_plan_{zone.upper()}_<timestamp>.json"
+    summary = summarize_backtest_plan(panel, cfg, fold_plan, planned_output)
+
+    print(f"Detected panel rows: {summary['panel_row_count']}")
+    print(f"Panel ds range: {summary['panel_min_ds']} -> {summary['panel_max_ds']}")
+    print("Leakage validation result: passed")
+    print("Overlap validation result: passed")
+    print(f"Intended output path: {planned_output}")
+
+    for fold in summary["folds"]:
+        row: dict[str, object] = fold if isinstance(fold, dict) else {}
+        print(
+            "Fold "
+            f"{row.get('fold_id')}: "
+            f"train[{row.get('train_start')} -> {row.get('train_end')}] "
+            f"origin={row.get('origin')} "
+            f"test[{row.get('test_start')} -> {row.get('test_end')}]"
+        )
+
+    if not write:
+        print("Dry-run only. Re-run with --write to persist backtest plan reports.")
+        return
+
+    json_path, md_path = write_backtest_plan(summary, output_dir=reports_root)
+    print(f"Backtest plan JSON: {json_path}")
+    print(f"Backtest plan Markdown: {md_path}")
 
 
 @app.command("inspect-pjm-api")

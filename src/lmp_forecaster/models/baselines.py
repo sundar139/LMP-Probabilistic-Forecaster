@@ -34,6 +34,14 @@ from lmp_forecaster.models.forecast_schema import (
     normalize_neuralforecast_output,
     validate_quantile_forecast,
 )
+from lmp_forecaster.tracking.mlflow_utils import (
+    TrackingConfig,
+    configure_mlflow,
+    log_artifact_paths,
+    log_metrics_table,
+    log_training_config,
+    start_mlflow_run,
+)
 
 
 @dataclass(frozen=True)
@@ -45,15 +53,22 @@ class BaselineTrainingConfig:
     horizon: int = 24
     input_size: int = 168
     quantiles: tuple[float, float, float] = (0.1, 0.5, 0.9)
+    interval_level: int = 80
     val_size: int = 72
     test_size: int = 72
     random_seed: int = 42
     max_steps_smoke: int = 30
+    max_steps_real_candidate: int = 200
     batch_size: int = 32
     num_workers: int = 0
+    accelerator: str = "auto"
     output_dir: Path | None = None
     skip_tft: bool = False
     skip_deepar: bool = False
+    tracking_enabled: bool = False
+    tracking_uri: str | None = None
+    tracking_experiment_name: str | None = None
+    tracking_run_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +84,72 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError(f"Config must parse to mapping: {path}")
     return raw
+
+
+def _validate_training_config(cfg: BaselineTrainingConfig) -> None:
+    if cfg.horizon <= 0:
+        raise ValueError("horizon_hours must be positive")
+    if cfg.input_size <= 0:
+        raise ValueError("input_size_hours must be positive")
+    if cfg.val_size <= 0 or cfg.test_size <= 0:
+        raise ValueError("validation_hours and test_hours must be positive")
+    if cfg.max_steps_smoke <= 0 or cfg.max_steps_real_candidate <= 0:
+        raise ValueError("training step counts must be positive")
+    if cfg.batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if cfg.interval_level <= 0 or cfg.interval_level >= 100:
+        raise ValueError("interval_level must be between 1 and 99")
+
+    q = tuple(float(v) for v in cfg.quantiles)
+    if len(q) != 3:
+        raise ValueError("Expected exactly 3 quantiles in training config.")
+    if sorted(q) != list(q):
+        raise ValueError("Quantiles must be sorted ascending.")
+    if q[0] <= 0 or q[-1] >= 1:
+        raise ValueError("Quantiles must be in (0, 1).")
+
+    implied_level = int(round((q[-1] - q[0]) * 100))
+    if implied_level != cfg.interval_level:
+        raise ValueError(
+            "interval_level must match quantile span (e.g., [0.1,0.5,0.9] -> 80)."
+        )
+
+    accel = cfg.accelerator.lower()
+    if accel not in {"auto", "gpu", "cpu"}:
+        raise ValueError("accelerator must be one of: auto, gpu, cpu")
+
+
+def _load_tracking_config() -> TrackingConfig:
+    root = get_project_paths().root
+    tracking_path = root / "conf" / "tracking.yaml"
+    if not tracking_path.exists():
+        return TrackingConfig()
+
+    payload = _load_yaml(tracking_path).get("tracking", {})
+    if not isinstance(payload, dict):
+        raise ValueError("conf/tracking.yaml missing tracking mapping")
+
+    return TrackingConfig(
+        enabled=bool(payload.get("enabled", False)),
+        experiment_name=str(payload.get("experiment_name", "lmp_probabilistic_forecaster")),
+        tracking_uri=str(payload.get("tracking_uri", "file:./mlruns")),
+        run_name_prefix=str(payload.get("run_name_prefix", "baseline")),
+        log_artifacts=bool(payload.get("log_artifacts", True)),
+        log_model_artifacts=bool(payload.get("log_model_artifacts", False)),
+    )
+
+
+def _resolve_tracking_config(cfg: BaselineTrainingConfig) -> TrackingConfig:
+    base = _load_tracking_config()
+    enabled = cfg.tracking_enabled or base.enabled
+    return TrackingConfig(
+        enabled=enabled,
+        experiment_name=cfg.tracking_experiment_name or base.experiment_name,
+        tracking_uri=cfg.tracking_uri or base.tracking_uri,
+        run_name_prefix=base.run_name_prefix,
+        log_artifacts=base.log_artifacts,
+        log_model_artifacts=base.log_model_artifacts,
+    )
 
 
 def load_training_config(
@@ -87,23 +168,43 @@ def load_training_config(
     if len(quantiles) != 3:
         raise ValueError("Expected exactly 3 quantiles in training config.")
 
-    return BaselineTrainingConfig(
+    horizon_raw = tr.get("horizon_hours")
+    input_size_raw = tr.get("input_size_hours")
+    val_raw = tr.get("validation_hours")
+    test_raw = tr.get("test_hours")
+    seed_raw = tr.get("seed")
+
+    cfg = BaselineTrainingConfig(
         zone=zone.upper(),
-        horizon=int(tr.get("horizon", 24)),
-        input_size=int(tr.get("input_size", 168)),
+        horizon=int(horizon_raw if horizon_raw is not None else tr.get("horizon", 24)),
+        input_size=int(input_size_raw if input_size_raw is not None else tr.get("input_size", 168)),
         quantiles=(quantiles[0], quantiles[1], quantiles[2]),
-        val_size=int(tr.get("val_size", 72)),
-        test_size=int(tr.get("test_size", 72)),
-        random_seed=int(tr.get("random_seed", 42)),
+        interval_level=int(tr.get("interval_level", 80)),
+        val_size=int(val_raw if val_raw is not None else tr.get("val_size", 72)),
+        test_size=int(test_raw if test_raw is not None else tr.get("test_size", 72)),
+        random_seed=int(seed_raw if seed_raw is not None else tr.get("random_seed", 42)),
         max_steps_smoke=steps,
+        max_steps_real_candidate=int(tr.get("max_steps_real_candidate", 200)),
         batch_size=int(tr.get("batch_size", 32)),
         num_workers=int(tr.get("num_workers", 0)),
+        accelerator=str(tr.get("accelerator", "auto")),
     )
+    _validate_training_config(cfg)
+    return cfg
 
 
-def detect_accelerator() -> AcceleratorInfo:
+def detect_accelerator(preferred: str = "auto") -> AcceleratorInfo:
     """Detect available training accelerator and trainer kwargs."""
-    if torch.cuda.is_available():
+    preference = preferred.lower()
+    if preference not in {"auto", "gpu", "cpu"}:
+        raise ValueError("accelerator must be one of: auto, gpu, cpu")
+
+    can_use_gpu = torch.cuda.is_available()
+    use_gpu = preference == "gpu" or (preference == "auto" and can_use_gpu)
+
+    if use_gpu:
+        if not can_use_gpu:
+            raise ValueError("accelerator='gpu' requested but CUDA is not available")
         name = torch.cuda.get_device_name(0)
         return AcceleratorInfo(
             kind="gpu",
@@ -210,7 +311,7 @@ def _fit_predict_model(
         chunk = min(cfg.horizon, len(remaining))
         expected = remaining.iloc[:chunk][["unique_id", "ds"]].copy()
 
-        raw_pred = nf.predict(df=history, quantiles=[0.1, 0.5, 0.9])
+        raw_pred = nf.predict(df=history, quantiles=list(cfg.quantiles))
         if "unique_id" not in raw_pred.columns:
             raw_pred = raw_pred.reset_index(drop=False)
         aligned = raw_pred.merge(expected, on=["unique_id", "ds"], how="right")
@@ -253,8 +354,8 @@ def train_tft_baseline(
         n_head=int(tft_cfg.get("n_head", 4)),
         dropout=float(tft_cfg.get("dropout", 0.1)),
         learning_rate=float(tft_cfg.get("learning_rate", 0.001)),
-        loss=MQLoss(quantiles=[0.1, 0.5, 0.9]),
-        valid_loss=MQLoss(quantiles=[0.1, 0.5, 0.9]),
+        loss=MQLoss(quantiles=list(cfg.quantiles)),
+        valid_loss=MQLoss(quantiles=list(cfg.quantiles)),
         max_steps=cfg.max_steps_smoke,
         batch_size=cfg.batch_size,
         random_seed=cfg.random_seed,
@@ -290,8 +391,8 @@ def train_deepar_baseline(
 
     dist_loss = DistributionLoss(
         distribution="StudentT",
-        quantiles=[0.1, 0.5, 0.9],
-        level=[80],
+        quantiles=list(cfg.quantiles),
+        level=[cfg.interval_level],
     )
 
     model = DeepAR(
@@ -327,7 +428,6 @@ def train_single_zone_baselines(cfg: BaselineTrainingConfig) -> dict[str, Any]:
     np.random.seed(cfg.random_seed)
 
     panel, source_label, panel_path = _load_or_build_panel(cfg)
-    train_start = time.perf_counter()
     try:
         validate_panel_schema(panel, PanelBuildConfig(zone=cfg.zone))
     except ValueError as exc:
@@ -356,7 +456,7 @@ def train_single_zone_baselines(cfg: BaselineTrainingConfig) -> dict[str, Any]:
     )
     history_df = pd.concat([train_df, val_df], ignore_index=True)
 
-    accel = detect_accelerator()
+    accel = detect_accelerator(cfg.accelerator)
     artifact_dir, forecast_dir, report_dir = _model_output_dirs(cfg)
 
     outputs: dict[str, Any] = {
@@ -376,122 +476,169 @@ def train_single_zone_baselines(cfg: BaselineTrainingConfig) -> dict[str, Any]:
             "unless --allow-synthetic-panel is set."
         )
 
-    if not cfg.skip_tft:
-        tft_fcst = train_tft_baseline(
-            train_df,
-            history_df,
-            test_df,
-            cfg,
-            accel,
-            data_source_label=source_label,
-        )
-        tft_path = forecast_dir / f"tft_forecast_{cfg.zone}.parquet"
-        tft_fcst.to_parquet(tft_path, index=False)
-        (artifact_dir / f"tft_artifact_{cfg.zone}.json").write_text(
-            json.dumps(
-                {
-                    "model": "TFT",
-                    "zone": cfg.zone,
-                    "max_steps": cfg.max_steps_smoke,
-                    "generated_at": datetime.now(UTC).isoformat(),
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        outputs["forecasts"]["TFT"] = str(tft_path)
-        outputs["metrics"]["TFT"] = evaluate_probabilistic_forecast(
-            tft_fcst,
-            model="TFT",
-            zone=cfg.zone,
-            data_source_label=source_label,
-        )
+    train_start = time.perf_counter()
+    tracking = _resolve_tracking_config(cfg)
+    tracking_ctx = configure_mlflow(tracking)
+    run_name = cfg.tracking_run_name or f"{tracking.run_name_prefix}_{cfg.zone.lower()}"
 
-    if not cfg.skip_deepar:
-        dr_fcst = train_deepar_baseline(
-            train_df,
-            history_df,
-            test_df,
-            cfg,
-            accel,
-            data_source_label=source_label,
-        )
-        dr_path = forecast_dir / f"deepar_forecast_{cfg.zone}.parquet"
-        dr_fcst.to_parquet(dr_path, index=False)
-        (artifact_dir / f"deepar_artifact_{cfg.zone}.json").write_text(
-            json.dumps(
-                {
-                    "model": "DeepAR",
-                    "zone": cfg.zone,
-                    "max_steps": cfg.max_steps_smoke,
-                    "generated_at": datetime.now(UTC).isoformat(),
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        outputs["forecasts"]["DeepAR"] = str(dr_path)
-        outputs["metrics"]["DeepAR"] = evaluate_probabilistic_forecast(
-            dr_fcst,
-            model="DeepAR",
-            zone=cfg.zone,
-            data_source_label=source_label,
-        )
-
-    metrics_json = report_dir / f"baseline_metrics_{cfg.zone}.json"
-    metrics_csv = report_dir / f"baseline_metrics_{cfg.zone}.csv"
-    metrics_payload = {
-        "generated_at": datetime.now(UTC).isoformat(),
-        "zone": cfg.zone,
-        "data_source_label": source_label,
-        "accelerator": {"kind": accel.kind, "device_name": accel.device_name},
-        "metrics": outputs["metrics"],
-    }
-    metrics_json.write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
-
-    if outputs["metrics"]:
-        pd.DataFrame(list(outputs["metrics"].values())).to_csv(metrics_csv, index=False)
-
-    train_report = report_dir / f"baseline_training_report_{cfg.zone}.json"
-    training_duration_seconds = float(time.perf_counter() - train_start)
-    split_sizes = {
-        "train": len(train_df),
-        "val": len(val_df),
-        "test": len(test_df),
-    }
-    train_report.write_text(
-        json.dumps(
+    with start_mlflow_run(tracking_ctx, run_name=run_name) as run:
+        logged_training_cfg = log_training_config(
+            run,
             {
-                "generated_at": datetime.now(UTC).isoformat(),
                 "zone": cfg.zone,
-                "panel_path": str(panel_path),
-                "source_label": source_label,
-                "split_sizes": split_sizes,
-                "accelerator": {"kind": accel.kind, "device_name": accel.device_name},
-                "forecasts": outputs["forecasts"],
-                "metrics_json": str(metrics_json),
-                "metrics_csv": str(metrics_csv),
-                "training_duration_seconds": training_duration_seconds,
-                "caveat": "first real single-zone untuned baseline",
+                "horizon_hours": cfg.horizon,
+                "input_size_hours": cfg.input_size,
+                "quantiles": cfg.quantiles,
+                "interval_level": cfg.interval_level,
+                "seed": cfg.random_seed,
+                "model_names": "TFT,DeepAR",
+                "data_source_label": source_label,
+                "validation_hours": cfg.val_size,
+                "test_hours": cfg.test_size,
+                "accelerator": accel.kind,
             },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+        )
 
-    results_summary = summarize_baseline_results(
-        zone=cfg.zone,
-        data_source_label=source_label,
-        panel=panel,
-        split_sizes=split_sizes,
-        metrics=outputs["metrics"],
-        forecasts=outputs["forecasts"],
-        accelerator_kind=accel.kind,
-        accelerator_device_name=accel.device_name,
-        training_duration_seconds=training_duration_seconds,
-    )
-    results_json_path = write_baseline_results_json(results_summary)
-    results_markdown_path = write_baseline_results_markdown(results_summary)
+        if not cfg.skip_tft:
+            tft_fcst = train_tft_baseline(
+                train_df,
+                history_df,
+                test_df,
+                cfg,
+                accel,
+                data_source_label=source_label,
+            )
+            tft_path = forecast_dir / f"tft_forecast_{cfg.zone}.parquet"
+            tft_fcst.to_parquet(tft_path, index=False)
+            (artifact_dir / f"tft_artifact_{cfg.zone}.json").write_text(
+                json.dumps(
+                    {
+                        "model": "TFT",
+                        "zone": cfg.zone,
+                        "max_steps": cfg.max_steps_smoke,
+                        "generated_at": datetime.now(UTC).isoformat(),
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            outputs["forecasts"]["TFT"] = str(tft_path)
+            outputs["metrics"]["TFT"] = evaluate_probabilistic_forecast(
+                tft_fcst,
+                model="TFT",
+                zone=cfg.zone,
+                data_source_label=source_label,
+            )
+
+        if not cfg.skip_deepar:
+            dr_fcst = train_deepar_baseline(
+                train_df,
+                history_df,
+                test_df,
+                cfg,
+                accel,
+                data_source_label=source_label,
+            )
+            dr_path = forecast_dir / f"deepar_forecast_{cfg.zone}.parquet"
+            dr_fcst.to_parquet(dr_path, index=False)
+            (artifact_dir / f"deepar_artifact_{cfg.zone}.json").write_text(
+                json.dumps(
+                    {
+                        "model": "DeepAR",
+                        "zone": cfg.zone,
+                        "max_steps": cfg.max_steps_smoke,
+                        "generated_at": datetime.now(UTC).isoformat(),
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            outputs["forecasts"]["DeepAR"] = str(dr_path)
+            outputs["metrics"]["DeepAR"] = evaluate_probabilistic_forecast(
+                dr_fcst,
+                model="DeepAR",
+                zone=cfg.zone,
+                data_source_label=source_label,
+            )
+
+        metrics_json = report_dir / f"baseline_metrics_{cfg.zone}.json"
+        metrics_csv = report_dir / f"baseline_metrics_{cfg.zone}.csv"
+        metrics_payload = {
+            "generated_at": datetime.now(UTC).isoformat(),
+            "zone": cfg.zone,
+            "data_source_label": source_label,
+            "accelerator": {"kind": accel.kind, "device_name": accel.device_name},
+            "metrics": outputs["metrics"],
+        }
+        metrics_json.write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
+
+        if outputs["metrics"]:
+            pd.DataFrame(list(outputs["metrics"].values())).to_csv(metrics_csv, index=False)
+
+        training_duration_seconds = float(time.perf_counter() - train_start)
+        split_sizes = {
+            "train": len(train_df),
+            "val": len(val_df),
+            "test": len(test_df),
+        }
+
+        train_report = report_dir / f"baseline_training_report_{cfg.zone}.json"
+        train_report.write_text(
+            json.dumps(
+                {
+                    "generated_at": datetime.now(UTC).isoformat(),
+                    "zone": cfg.zone,
+                    "panel_path": str(panel_path),
+                    "source_label": source_label,
+                    "split_sizes": split_sizes,
+                    "accelerator": {"kind": accel.kind, "device_name": accel.device_name},
+                    "forecasts": outputs["forecasts"],
+                    "metrics_json": str(metrics_json),
+                    "metrics_csv": str(metrics_csv),
+                    "training_duration_seconds": training_duration_seconds,
+                    "caveat": "first real single-zone untuned baseline",
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        results_summary = summarize_baseline_results(
+            zone=cfg.zone,
+            data_source_label=source_label,
+            panel=panel,
+            split_sizes=split_sizes,
+            metrics=outputs["metrics"],
+            forecasts=outputs["forecasts"],
+            accelerator_kind=accel.kind,
+            accelerator_device_name=accel.device_name,
+            training_duration_seconds=training_duration_seconds,
+        )
+        results_json_path = write_baseline_results_json(results_summary)
+        results_markdown_path = write_baseline_results_markdown(results_summary)
+
+        log_metrics_table(run, outputs["metrics"])
+        if tracking.log_artifacts:
+            log_artifact_paths(
+                run,
+                {
+                    "metrics_json": str(metrics_json),
+                    "metrics_csv": str(metrics_csv),
+                    "training_report": str(train_report),
+                    "results_summary_json": str(results_json_path),
+                    "results_summary_markdown": str(results_markdown_path),
+                    **dict(outputs["forecasts"]),
+                },
+                artifact_file=f"artifact_paths_{cfg.zone}.txt",
+            )
+
+        outputs["tracking"] = {
+            "enabled": tracking_ctx.enabled,
+            "reason": tracking_ctx.reason,
+            "tracking_uri": tracking.tracking_uri,
+            "experiment_name": tracking.experiment_name,
+            "logged_param_count": len(logged_training_cfg),
+        }
 
     outputs["metrics_json"] = str(metrics_json)
     outputs["metrics_csv"] = str(metrics_csv)

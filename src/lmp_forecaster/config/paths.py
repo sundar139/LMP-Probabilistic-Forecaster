@@ -42,7 +42,6 @@ class ProjectPaths:
             self.cache,
             self.processed,
             self.artifacts,
-            self.mlruns,
         ]:
             folder.mkdir(parents=True, exist_ok=True)
 

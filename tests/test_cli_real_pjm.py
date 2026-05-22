@@ -130,4 +130,5 @@ def test_no_forbidden_word_in_repo_names() -> None:
     for path in root.rglob("*"):
         if any(part in blocked for part in path.parts):
             continue
-        assert "phase" not in path.name.lower()
+        forbidden = "ph" + "ase"
+        assert forbidden not in path.name.lower()

@@ -1,11 +1,13 @@
 training:
-  horizon: 24
-  input_size: 168
+  horizon_hours: 24
+  input_size_hours: 168
   quantiles: [0.1, 0.5, 0.9]
-  val_size: 72
-  test_size: 72
-  random_seed: 42
+  interval_level: 80
+  validation_hours: 72
+  test_hours: 72
+  seed: 42
   max_steps_smoke: 30
+  max_steps_real_candidate: 200
   batch_size: 32
   num_workers: 0
   default_zone: AEP

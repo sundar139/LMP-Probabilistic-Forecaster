@@ -1,5 +1,54 @@
 # Engineering notes
 
+## 2026-05-22 — Step 7 hardening: optional tracking + backtest planning scaffold
+
+Mistake observed:
+- Initial Step 7 integration introduced static-analysis issues (mypy typing around dynamic fold summaries, long-line/import ordering lint failures), plus one CLI dry-run test that built panel data outside isolated filesystem.
+- A temporary patch accidentally removed `tracking_ctx`/`run_name` initialization in baseline training flow.
+
+Root cause:
+1. Backtest summary structure is intentionally dynamic (`dict[str, Any]`), but typed as `dict[str, object]` in helper signatures, causing mypy attr/iterability errors.
+2. CLI fold-print loop indexed dynamic dicts directly without type narrowing.
+3. Test fixture order mismatch: pre-created panel path outside `CliRunner.isolated_filesystem` meant command could not resolve panel file in test sandbox.
+4. Fast patch edit on training path dropped required tracking init lines.
+
+Fix implemented:
+1. Added optional tracking module `src/lmp_forecaster/tracking/mlflow_utils.py` with:
+   - `TrackingConfig`
+   - `get_tracking_uri`
+   - `configure_mlflow`
+   - `start_mlflow_run`
+   - `log_training_config`
+   - `log_metrics_table`
+   - `log_artifact_paths`
+   - `safe_log_params`
+2. Added tracking config `conf/tracking.yaml` (disabled by default, local URI `file:./mlruns`).
+3. Wired training CLI and baseline pipeline with tracking flags while preserving dry-run no-write behavior.
+4. Added fold-planning scaffold `src/lmp_forecaster/eval/backtest.py` and CLI command `plan-rolling-backtest`.
+5. Hardened training config parsing/validation:
+   - explicit `horizon_hours`, `input_size_hours`, `validation_hours`, `test_hours`, `interval_level`, `max_steps_real_candidate`, `accelerator`
+   - robust validation for quantiles/interval/split sizes.
+6. Fixed mypy/ruff issues by:
+   - narrowing dynamic fold types (`dict[str, object]` local cast + `Any` summary typing),
+   - restoring dropped `tracking_ctx`/`run_name`,
+   - import/format cleanup.
+7. Fixed CLI backtest dry-run test to create panel file inside isolated filesystem.
+
+Regression protection:
+- Added tests:
+  - `tests/test_mlflow_tracking.py`
+  - `tests/test_backtest.py`
+  - `tests/test_cli_backtest.py`
+- Expanded tests:
+  - `tests/test_baseline_config.py`
+  - `tests/test_cli_training.py`
+- Full gates pass after fixes: Ruff, mypy, pytest.
+
+Lesson learned:
+- Planning/report helpers that intentionally carry heterogeneous dictionaries should be typed explicitly as `Any` at interfaces, then narrowed locally.
+- For CLI tests using isolated filesystems, create all input artifacts inside the sandbox or path resolution will fail despite valid command logic.
+- For quick patches in critical training flow, immediately re-read modified block to catch dropped initialization statements.
+
 ## 2026-05-22 — Step 6 continuation stabilization (lint/type/runtime/training)
 
 Mistake observed:

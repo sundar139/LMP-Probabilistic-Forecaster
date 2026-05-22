@@ -1,0 +1,7 @@
+tracking:
+  enabled: false
+  experiment_name: lmp_probabilistic_forecaster
+  tracking_uri: file:./mlruns
+  run_name_prefix: baseline
+  log_artifacts: true
+  log_model_artifacts: false

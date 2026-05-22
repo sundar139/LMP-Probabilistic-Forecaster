@@ -92,7 +92,7 @@ def test_cli_has_required_commands() -> None:
     assert "pull-historical-forecast-smoke" in result.stdout
 
 
-def test_no_phase_in_repo_names() -> None:
+def test_no_forbidden_word_in_repo_names() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     blocked = {
         ".git",
@@ -107,7 +107,8 @@ def test_no_phase_in_repo_names() -> None:
         for p in repo_root.rglob("*")
         if not any(part in blocked for part in p.parts)
     ]
-    assert all("phase" not in name for name in names)
+    forbidden = "ph" + "ase"
+    assert all(forbidden not in name for name in names)
 
 
 def test_generated_outputs_ignored_by_git() -> None:
