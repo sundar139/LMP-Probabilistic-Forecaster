@@ -24,8 +24,11 @@ from lmp_forecaster.data.openmeteo_weather import (
     pull_historical_weather_smoke,
 )
 from lmp_forecaster.data.pjm_api import (
+    PjmApiError,
     build_day_ahead_lmp_params,
     build_pjm_api_headers,
+    effective_max_connections_per_minute,
+    effective_pjm_throttle_seconds,
     fetch_pjm_json_page,
     normalize_da_lmp_response,
     redact_headers,
@@ -512,8 +515,12 @@ def inspect_pjm_api_command(
     print(f"Headers: {headers}")
     print(f"Params: {params}")
 
-    payload = fetch_pjm_json_page(config=cfg, endpoint="da_hrl_lmps", params=params)
-    normalized = normalize_da_lmp_response(payload, zone=zone.upper(), timezone=cfg.timezone)
+    try:
+        payload = fetch_pjm_json_page(config=cfg, endpoint="da_hrl_lmps", params=params)
+        normalized = normalize_da_lmp_response(payload, zone=zone.upper(), timezone=cfg.timezone)
+    except PjmApiError as exc:
+        print(f"PJM API inspect failed: {exc}")
+        raise typer.Exit(code=2) from exc
 
     if isinstance(payload, dict):
         print(f"Response keys: {sorted(payload.keys())}")
@@ -534,16 +541,27 @@ def pull_real_pjm_lmp_command(
         str | None,
         typer.Option(help="Inclusive end date (YYYY-MM-DD)."),
     ] = None,
-    chunk_days: Annotated[int, typer.Option(min=1, max=90)] = 31,
+    chunk_days: Annotated[int, typer.Option(min=1, max=90)] = 7,
     row_count: Annotated[int, typer.Option(min=100, max=50000)] = 50000,
     write: Annotated[bool, typer.Option(help="Execute pull and write outputs.")] = False,
     overwrite: Annotated[bool, typer.Option(help="Overwrite existing local outputs.")] = False,
     one_year: Annotated[bool, typer.Option(help="Use default full-year date window.")] = False,
+    allow_partial_completion: Annotated[
+        bool,
+        typer.Option(
+            "--allow-partial-completion",
+            help="Continue and record failed chunks instead of failing fast.",
+        ),
+    ] = False,
 ) -> None:
     """Backfill real PJM DA LMP for a single zone into ignored local cache paths."""
     parsed_start = _parse_iso_date_option(start_date, option_name="--start-date")
     parsed_end = _parse_iso_date_option(end_date, option_name="--end-date")
     start, end = _resolve_real_pjm_window(one_year, parsed_start, parsed_end)
+
+    api_cfg = resolve_pjm_api_config()
+    effective_connections = effective_max_connections_per_minute(api_cfg)
+    throttle_seconds = effective_pjm_throttle_seconds(api_cfg)
 
     backfill_cfg = PjmBackfillConfig(
         zone=zone.upper(),
@@ -553,6 +571,7 @@ def pull_real_pjm_lmp_command(
         row_count=row_count,
         overwrite=overwrite,
         dry_run=not write,
+        allow_partial_completion=allow_partial_completion,
     )
     chunks = plan_backfill_chunks(backfill_cfg)
 
@@ -562,12 +581,13 @@ def pull_real_pjm_lmp_command(
     print(f"Chunks planned: {len(chunks)}")
     print(f"Chunk days: {chunk_days}")
     print(f"row_count: {row_count}")
+    print(f"Effective PJM connection limit (/min): {effective_connections}")
+    print(f"Throttle seconds between requests: {throttle_seconds:.1f}")
 
     if not write:
         print("Dry-run only. Re-run with --write to pull and persist real data.")
         return
 
-    api_cfg = resolve_pjm_api_config()
     if not api_cfg.api_key:
         print(
             "PJM_API_KEY is required for automated Data Miner API ingestion. "
@@ -579,6 +599,7 @@ def pull_real_pjm_lmp_command(
     print(f"Raw outputs: {[str(p) for p in result.raw_paths]}")
     print(f"Normalized outputs: {[str(p) for p in result.normalized_paths]}")
     print(f"Quality report: {result.quality_report_path}")
+    print(f"Manifest: {result.manifest_path}")
     print(f"Rows pulled: {result.combined_rows}")
 
 

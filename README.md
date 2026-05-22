@@ -51,13 +51,13 @@ Write 30-day pull:
 uv run python -m lmp_forecaster.cli pull-real-pjm-lmp --zone AEP --start-date 2024-01-01 --end-date 2024-01-31 --write
 ```
 
-Write one-year pull:
+Write one-year pull (resumable):
 
 ```powershell
 uv run python -m lmp_forecaster.cli pull-real-pjm-lmp --zone AEP --one-year --write
 ```
 
-Workflow recommendation: run 30-day first, then one-year.
+Workflow recommendation: run 30-day first, then one-year. If interrupted, rerun the same one-year command to resume.
 
 ## Data privacy policy reminder
 
@@ -79,10 +79,13 @@ Raw PJM and all derived outputs are private local artifacts and are ignored by G
   - update normalization mapping in `src/lmp_forecaster/data/pjm_api.py`
 - Rate limits:
   - reduce request cadence / chunk size
+  - non-member users should stay <=6/min; this project defaults to 5/min
 - Empty AEP results:
   - verify date range and filter behavior
 - DST row differences:
   - expected for spring/fall transitions; inspect quality report
+- Interrupted one-year pull:
+  - rerun the same command to resume from valid chunks
 
 ## Quality gates
 

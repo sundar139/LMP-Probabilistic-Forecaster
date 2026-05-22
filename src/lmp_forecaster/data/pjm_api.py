@@ -19,6 +19,7 @@ from typing import Any
 import pandas as pd
 
 from lmp_forecaster.config.paths import get_project_paths
+from lmp_forecaster.config.settings import get_settings
 from lmp_forecaster.data.http_client import HttpClientConfig, HttpRequestError, request_with_retries
 
 
@@ -32,14 +33,64 @@ class PjmApiConfig:
     timezone: str = "America/New_York"
 
 
+MAX_NON_MEMBER_CONNECTIONS_PER_MINUTE = 5
+MIN_PJM_THROTTLE_SECONDS = 12.0
+
+
 class PjmApiError(RuntimeError):
     """Raised for PJM API ingestion/normalization failures."""
 
 
 def resolve_pjm_api_config() -> PjmApiConfig:
-    api_key = os.getenv("PJM_API_KEY") or os.getenv("LMP_PJM_API_KEY")
-    api_base = os.getenv("PJM_API_BASE_URL") or os.getenv("LMP_PJM_API_BASE_URL")
-    return PjmApiConfig(api_key=api_key or None, api_base_url=api_base or "https://api.pjm.com/api/v1")
+    settings = get_settings()
+    dot_env: dict[str, str] = {}
+    env_path = get_project_paths().root / ".env"
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            s = line.strip()
+            if not s or s.startswith("#") or "=" not in s:
+                continue
+            k, v = s.split("=", 1)
+            dot_env[k.strip()] = v.strip()
+
+    api_key = (
+        os.getenv("PJM_API_KEY")
+        or os.getenv("LMP_PJM_API_KEY")
+        or dot_env.get("PJM_API_KEY")
+        or dot_env.get("LMP_PJM_API_KEY")
+        or settings.pjm_api_key
+    )
+    api_base = (
+        os.getenv("PJM_API_BASE_URL")
+        or os.getenv("LMP_PJM_API_BASE_URL")
+        or dot_env.get("PJM_API_BASE_URL")
+        or dot_env.get("LMP_PJM_API_BASE_URL")
+        or settings.pjm_api_base_url
+    )
+    configured_connections = settings.pjm_max_connections_per_minute
+    effective_connections = max(
+        1,
+        min(MAX_NON_MEMBER_CONNECTIONS_PER_MINUTE, int(configured_connections)),
+    )
+
+    return PjmApiConfig(
+        api_key=api_key or None,
+        api_base_url=api_base or "https://api.pjm.com/api/v1",
+        max_connections_per_minute=effective_connections,
+        timeout_seconds=settings.pjm_timeout_seconds,
+    )
+
+
+def effective_max_connections_per_minute(config: PjmApiConfig) -> int:
+    return max(
+        1,
+        min(MAX_NON_MEMBER_CONNECTIONS_PER_MINUTE, int(config.max_connections_per_minute)),
+    )
+
+
+def effective_pjm_throttle_seconds(config: PjmApiConfig) -> float:
+    connections = effective_max_connections_per_minute(config)
+    return max(MIN_PJM_THROTTLE_SECONDS, 60.0 / connections)
 
 
 def redact_headers(headers: dict[str, str]) -> dict[str, str]:
@@ -70,17 +121,12 @@ def build_day_ahead_lmp_params(
     start_row: int,
     row_count: int,
 ) -> dict[str, str | int]:
+    _ = zone  # zone filtering is applied client-side for archived data compatibility
     return {
         "startRow": start_row,
         "rowCount": row_count,
         "datetime_beginning_ept": _to_ept_range(start, end),
-        "fields": (
-            "datetime_beginning_utc,datetime_beginning_ept,pnode_id,pnode_name,pnode_type,"
-            "type,zone,system_energy_price_da,total_lmp_da,congestion_price_da,"
-            "marginal_loss_price_da"
-        ),
-        # best-effort server-side filter; we still filter defensively client-side
-        "pnode_name": zone.upper(),
+        "type": "ZONE",
     }
 
 
@@ -148,7 +194,7 @@ def fetch_pjm_paginated(
 ) -> list[dict[str, Any]]:
     start_row = int(base_params.get("startRow", 1))
     row_count = int(base_params.get("rowCount", config.row_count))
-    throttle_seconds = 60.0 / max(1, config.max_connections_per_minute)
+    throttle_seconds = effective_pjm_throttle_seconds(config)
 
     out: list[dict[str, Any]] = []
     while True:
@@ -176,19 +222,55 @@ def _find_column(columns: list[str], candidates: list[str]) -> str | None:
     return None
 
 
-def _parse_ds(value: Any, timezone: str) -> pd.Timestamp:
-    if value is None:
-        raise PjmApiError("Missing timestamp value in PJM row.")
+def _parse_ds_series(
+    values: pd.Series,
+    *,
+    timezone: str,
+    source_column: str,
+) -> pd.Series:
+    cleaned = (
+        values.astype(str)
+        .str.strip()
+        .str.replace("EPT", "", regex=False)
+        .str.replace("EST", "", regex=False)
+        .str.replace("EDT", "", regex=False)
+        .str.strip()
+    )
 
-    text = str(value).strip().replace("EPT", "").replace("EST", "").replace("EDT", "").strip()
-    ts = pd.to_datetime(text, errors="coerce", utc=False)
-    if pd.isna(ts):
-        raise PjmApiError(f"Could not parse PJM timestamp: {value}")
+    if "utc" in source_column.lower():
+        utc_ts = pd.to_datetime(cleaned, errors="coerce", utc=True)
+        if utc_ts.isna().any():
+            raise PjmApiError(
+                f"Could not parse PJM UTC timestamp values from column: {source_column}"
+            )
+        return utc_ts.dt.tz_convert(timezone)
 
-    stamp = pd.Timestamp(ts)
-    if stamp.tzinfo is None:
-        return stamp.tz_localize(timezone, ambiguous="NaT", nonexistent="shift_forward")
-    return stamp.tz_convert(timezone)
+    parsed = pd.to_datetime(cleaned, errors="coerce", utc=False)
+    if parsed.isna().any():
+        raise PjmApiError(
+            f"Could not parse PJM timestamp values from column: {source_column}"
+        )
+
+    if parsed.dt.tz is None:
+        try:
+            localized = parsed.dt.tz_localize(
+                timezone,
+                ambiguous="infer",
+                nonexistent="shift_forward",
+            )
+        except Exception:
+            localized = parsed.dt.tz_localize(
+                timezone,
+                ambiguous=False,
+                nonexistent="shift_forward",
+            )
+        if localized.isna().any():
+            raise PjmApiError(
+                f"PJM timestamp localization produced nulls in column: {source_column}"
+            )
+        return localized
+
+    return parsed.dt.tz_convert(timezone)
 
 
 def normalize_da_lmp_response(
@@ -204,6 +286,8 @@ def normalize_da_lmp_response(
                 "unique_id",
                 "ds",
                 "y",
+                "market",
+                "location_type",
                 "pnode_name",
                 "pnode_type",
                 "source",
@@ -214,7 +298,7 @@ def normalize_da_lmp_response(
     frame = pd.DataFrame.from_records(rows)
     columns = list(frame.columns)
 
-    ds_col = _find_column(columns, ["datetime_beginning_ept", "datetime_beginning_utc", "ds"])
+    ds_col = _find_column(columns, ["datetime_beginning_utc", "datetime_beginning_ept", "ds"])
     y_col = _find_column(
         columns,
         ["total_lmp_da", "lmp", "da_lmp", "price", "system_energy_price_da"],
@@ -232,8 +316,14 @@ def normalize_da_lmp_response(
     out = pd.DataFrame(
         {
             "unique_id": zone.upper(),
-            "ds": frame[ds_col].map(lambda v: _parse_ds(v, timezone)),
+            "ds": _parse_ds_series(frame[ds_col], timezone=timezone, source_column=ds_col),
             "y": pd.to_numeric(frame[y_col], errors="coerce"),
+            "market": "DAY_AHEAD",
+            "location_type": (
+                frame[pnode_type_col].astype(str).str.upper()
+                if pnode_type_col in frame.columns
+                else "ZONE"
+            ),
             "pnode_name": frame[pnode_col].astype(str) if pnode_col else zone.upper(),
             "pnode_type": (
                 frame[pnode_type_col].astype(str).str.upper()
@@ -287,7 +377,7 @@ def write_lmp_cache(
 ) -> Path:
     root = output_root or (get_project_paths().root / "data" / "cache" / "pjm" / "da_hrl_lmps")
     root.mkdir(parents=True, exist_ok=True)
-    path = root / f"aep_da_lmp_{start.isoformat()}_{end.isoformat()}.parquet"
+    path = root / f"{zone.lower()}_da_lmp_{start.isoformat()}_{end.isoformat()}.parquet"
     frame.to_parquet(path, index=False)
     return path
 

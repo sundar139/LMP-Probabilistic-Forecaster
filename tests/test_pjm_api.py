@@ -11,6 +11,7 @@ from lmp_forecaster.data.pjm_api import (
     PjmApiError,
     build_day_ahead_lmp_params,
     build_pjm_api_headers,
+    effective_pjm_throttle_seconds,
     normalize_da_lmp_response,
     redact_headers,
 )
@@ -44,6 +45,19 @@ def test_params_include_startrow_rowcount_datetime_range() -> None:
     assert params["startRow"] == 1
     assert params["rowCount"] == 10
     assert "datetime_beginning_ept" in params
+    assert "fields" not in params
+    assert "pnode_name" not in params
+    assert params["type"] == "ZONE"
+
+
+def test_non_member_defaults_are_conservative() -> None:
+    cfg = PjmApiConfig()
+    assert cfg.max_connections_per_minute <= 5
+
+
+def test_effective_throttle_seconds_has_minimum_floor() -> None:
+    cfg = PjmApiConfig(max_connections_per_minute=5)
+    assert effective_pjm_throttle_seconds(cfg) >= 12.0
 
 
 def test_normalization_maps_columns_and_preserves_negative_prices() -> None:
@@ -122,3 +136,27 @@ def test_duplicate_timestamps_can_be_detected_post_normalization() -> None:
     }
     df = normalize_da_lmp_response(payload, zone="AEP")
     assert bool(df.duplicated(subset=["unique_id", "ds"]).any())
+
+
+def test_normalization_prefers_utc_to_avoid_dst_ambiguous_nats() -> None:
+    payload = {
+        "items": [
+            {
+                "datetime_beginning_ept": "11/03/2024 01:00",
+                "datetime_beginning_utc": "2024-11-03T05:00:00Z",
+                "pnode_name": "AEP",
+                "pnode_type": "ZONE",
+                "total_lmp_da": 20.0,
+            },
+            {
+                "datetime_beginning_ept": "11/03/2024 01:00",
+                "datetime_beginning_utc": "2024-11-03T06:00:00Z",
+                "pnode_name": "AEP",
+                "pnode_type": "ZONE",
+                "total_lmp_da": 21.0,
+            },
+        ]
+    }
+    df = normalize_da_lmp_response(payload, zone="AEP")
+    assert len(df) == 2
+    assert not df["ds"].isna().any()

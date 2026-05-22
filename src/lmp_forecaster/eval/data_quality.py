@@ -26,6 +26,10 @@ def build_lmp_quality_report(
         raise ValueError(f"LMP quality input missing required columns: {missing}")
 
     out = frame.copy()
+    for col in required:
+        if out[col].isna().any():
+            raise ValueError(f"LMP quality input has null values in required column: {col}")
+
     out["ds"] = pd.to_datetime(out["ds"], errors="coerce", utc=False)
     if out["ds"].isna().any():
         raise ValueError("LMP quality input has invalid ds values.")
@@ -39,8 +43,9 @@ def build_lmp_quality_report(
     duplicates = int(out.duplicated(subset=["unique_id", "ds"]).sum())
     min_ds = out["ds"].min()
     max_ds = out["ds"].max()
+    unique_hours = int(out.drop_duplicates(subset=["unique_id", "ds"]).shape[0])
     expected_hours = len(pd.date_range(min_ds, max_ds, freq="h")) if len(out) > 0 else 0
-    missing_hours = int(max(0, expected_hours - len(out)))
+    missing_hours = int(max(0, expected_hours - unique_hours))
 
     dst = [
         {"day": d.day, "hours": d.hours}

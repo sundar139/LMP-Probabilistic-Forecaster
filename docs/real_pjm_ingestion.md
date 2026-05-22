@@ -29,8 +29,13 @@ Core query params:
 - `startRow`
 - `rowCount`
 - `datetime_beginning_ept=MM/DD/YYYY HH:mmtoMM/DD/YYYY HH:mm`
+- `type=ZONE`
 
-Best-effort filter sent as `pnode_name=AEP`; client-side normalization/filtering remains authoritative.
+Archived compatibility notes:
+
+- Do not send `fields` for this pull path.
+- Do not send `pnode_name` for this pull path.
+- Keep filtering authoritative on the client side after normalization.
 
 ## AEP zone filtering strategy
 
@@ -40,12 +45,17 @@ Best-effort filter sent as `pnode_name=AEP`; client-side normalization/filtering
 
 ## Backfill chunking
 
-- Default chunk size: 31 days
+- Default chunk size: 7 days (conservative for non-member usage)
 - Supports 30-day initial pull and one-year pull (`--one-year`)
+- One-year pull is resumable: rerun the same command to continue from existing valid chunks
+- Manifest is written under `data/cache/reports/pjm_backfill_manifest_AEP_2024.json`
 
 ## Rate limiting
 
-Client config supports a conservative connections-per-minute cap.
+- PJM non-member limit is 6 connections/minute.
+- Project default enforces <=5 connections/minute for safety margin.
+- Effective throttle is `max(12.0, 60 / connections_per_minute)` seconds between requests.
+- HTTP 429 path applies cooldown >= 90 seconds before retry.
 
 ## Data quality report fields
 
@@ -60,6 +70,7 @@ Quality report includes row counts, expected/missing hours, duplicates, DST day 
 ## Why outputs are ignored by Git
 
 Raw and derived PJM data are private, potentially licensed/sensitive, and are intentionally excluded from source control.
+Generated reports/manifests also remain ignored.
 
 ## Next step
 
