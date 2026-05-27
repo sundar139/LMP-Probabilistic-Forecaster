@@ -58,6 +58,14 @@ from lmp_forecaster.eval.backtest import (
     validate_backtest_folds,
     write_backtest_plan,
 )
+from lmp_forecaster.eval.backtest_runner import (
+    BacktestRunConfig,
+    load_backtest_panel,
+    log_backtest_tracking,
+    planned_output_paths,
+    run_rolling_backtest,
+    write_backtest_results,
+)
 from lmp_forecaster.eval.data_quality import (
     build_weather_quality_report,
     write_weather_quality_report,
@@ -696,6 +704,163 @@ def plan_rolling_backtest_command(
     json_path, md_path = write_backtest_plan(summary, output_dir=reports_root)
     print(f"Backtest plan JSON: {json_path}")
     print(f"Backtest plan Markdown: {md_path}")
+
+
+@app.command("run-rolling-backtest")
+def run_rolling_backtest_command(
+    zone: Annotated[str, typer.Option(help="Zone code, defaults to AEP.")] = "AEP",
+    panel_path: Annotated[
+        Path,
+        typer.Option(help="Panel parquet path for rolling-origin backtest."),
+    ] = Path("data/processed/panel/single_zone/AEP_panel.parquet"),
+    folds: Annotated[int, typer.Option(min=1, help="Number of folds.")] = 3,
+    horizon_hours: Annotated[int, typer.Option(min=1, help="Test horizon per fold in hours.")] = 24,
+    min_train_hours: Annotated[
+        int,
+        typer.Option(min=1, help="Minimum train history per fold in hours."),
+    ] = 2160,
+    window_mode: Annotated[
+        str,
+        typer.Option(help="Train window mode: expanding or rolling."),
+    ] = "expanding",
+    write: Annotated[
+        bool,
+        typer.Option(help="Train/evaluate folds and write outputs when set."),
+    ] = False,
+    skip_tft: Annotated[bool, typer.Option(help="Skip TFT model backtest.")] = False,
+    skip_deepar: Annotated[bool, typer.Option(help="Skip DeepAR model backtest.")] = False,
+    enable_tracking: Annotated[
+        bool,
+        typer.Option(help="Enable MLflow tracking for this run."),
+    ] = False,
+    tracking_uri: Annotated[
+        str | None,
+        typer.Option(help="Optional MLflow tracking URI override."),
+    ] = None,
+    experiment_name: Annotated[
+        str | None,
+        typer.Option(help="Optional MLflow experiment name override."),
+    ] = None,
+    run_name: Annotated[
+        str | None,
+        typer.Option(help="Optional MLflow run name override."),
+    ] = None,
+    max_steps: Annotated[
+        int | None,
+        typer.Option(help="Override max training steps per fold/model."),
+    ] = None,
+    output_dir: Annotated[
+        Path | None,
+        typer.Option(help="Optional override for backtest output root directory."),
+    ] = None,
+) -> None:
+    """Execute rolling-origin backtest over real AEP panel with TFT/DeepAR baselines."""
+    default_cfg = BacktestRunConfig()
+    cfg = BacktestRunConfig(
+        zone=zone.upper(),
+        panel_path=panel_path,
+        folds=folds,
+        horizon_hours=horizon_hours,
+        min_train_hours=min_train_hours,
+        input_size_hours=default_cfg.input_size_hours,
+        window_mode=window_mode,
+        models=default_cfg.models,
+        max_steps=max_steps or default_cfg.max_steps,
+        seed=default_cfg.seed,
+        skip_tft=skip_tft,
+        skip_deepar=skip_deepar,
+        require_real_data=True,
+        enable_tracking=enable_tracking,
+        tracking_uri=tracking_uri,
+        experiment_name=experiment_name,
+        run_name=run_name,
+        output_root=output_dir or default_cfg.output_root,
+        report_root=default_cfg.report_root,
+        artifact_root=default_cfg.artifact_root,
+    )
+
+    try:
+        cfg.validate()
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    print("[bold]Rolling-origin backtest execution[/bold]")
+    print(f"Zone: {cfg.zone}")
+    print(f"Panel path: {panel_path}")
+    print(
+        f"folds={cfg.folds}, horizon_hours={cfg.horizon_hours}, "
+        f"min_train_hours={cfg.min_train_hours}, window_mode={cfg.window_mode}"
+    )
+    print(f"models_enabled={cfg.enabled_models}")
+    print(f"max_steps={cfg.max_steps}")
+    print(
+        "tracking_enabled="
+        f"{cfg.enable_tracking}, "
+        f"tracking_uri={cfg.tracking_uri or '(default file:./mlruns)'}, "
+        f"experiment_name={cfg.experiment_name or '(default lmp_rolling_backtest)'}"
+    )
+
+    try:
+        panel, source_label = load_backtest_panel(
+            cfg.panel_path,
+            zone=cfg.zone,
+            require_real_data=True,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(str(exc))
+        raise typer.Exit(code=2) from exc
+
+    plan_cfg = BacktestConfig(
+        zone=cfg.zone,
+        horizon_hours=cfg.horizon_hours,
+        folds=cfg.folds,
+        min_train_hours=cfg.min_train_hours,
+        window_mode=cfg.window_mode,
+    )
+    fold_plan = make_rolling_origin_folds(panel, plan_cfg)
+    validate_backtest_folds(fold_plan)
+
+    print(f"Data source label: {source_label}")
+    print(f"Detected panel rows: {len(panel)}")
+    print(f"Panel ds range: {panel['ds'].min()} -> {panel['ds'].max()}")
+    print("Leakage validation result: passed")
+    print("Overlap validation result: passed")
+    print("Planned folds:")
+    for fold in fold_plan:
+        print(
+            "- fold_id="
+            f"{fold.fold_id} "
+            f"train[{fold.train_start} -> {fold.train_end}] "
+            f"test[{fold.test_start} -> {fold.test_end}] "
+            f"train_rows={fold.train_rows} test_rows={fold.test_rows}"
+        )
+
+    expected = planned_output_paths(cfg)
+    print("Expected output paths:")
+    for key, value in expected.items():
+        print(f"- {key}: {value}")
+
+    if not write:
+        print("Dry-run only. Re-run with --write to execute fold training/evaluation.")
+        return
+
+    result = run_rolling_backtest(cfg)
+    if result.accelerator == "gpu":
+        print(f"Accelerator selected: GPU ({result.device_name})")
+    else:
+        print(f"Accelerator selected: CPU fallback ({result.device_name})")
+
+    paths = write_backtest_results(result)
+    tracking_status = log_backtest_tracking(result, paths)
+    result.tracking = tracking_status
+
+    print(f"Forecast outputs: {paths['forecasts']}")
+    print(f"Fold metrics CSV: {paths['fold_metrics']}")
+    print(f"Aggregate metrics CSV: {paths['aggregate_metrics']}")
+    print(f"Summary JSON: {paths['summary_json']}")
+    print(f"Summary Markdown: {paths['summary_markdown']}")
+    print(f"Manifest: {paths['manifest']}")
+    print(f"Tracking status: {tracking_status}")
 
 
 @app.command("inspect-pjm-api")

@@ -4,11 +4,12 @@ Local-first probabilistic forecasting for PJM day-ahead hourly zonal LMPs.
 
 ## Current status
 
-Implemented and validated through Step 7 foundation hardening:
+Implemented and validated through Step 8 foundation pass:
 - real AEP single-zone baseline workflow from Step 6 remains reproducible,
 - optional MLflow tracking layer added (disabled by default),
 - baseline training config hardened with stricter validation,
-- rolling-origin backtest planning scaffold added (planning/report only).
+- rolling-origin planning scaffold from Step 7 is now extended to real fold execution,
+- real rolling-origin AEP backtest execution completed for TFT and DeepAR across 3 folds.
 
 Current real AEP metrics are first-run untuned metrics and are not final benchmark claims.
 
@@ -55,22 +56,22 @@ uv run python -m lmp_forecaster.cli train-single-zone-baselines \
   --write
 ```
 
-## Backtest planning commands
+## Backtest execution commands
 
-Dry-run plan:
+Dry-run execution (plan only, no training/writes/tracking):
 
 ```bash
-uv run python -m lmp_forecaster.cli plan-rolling-backtest \
+uv run python -m lmp_forecaster.cli run-rolling-backtest \
   --zone AEP \
   --panel-path data/processed/panel/single_zone/AEP_panel.parquet \
   --folds 3 \
   --horizon-hours 24
 ```
 
-Write plan report:
+Real write execution:
 
 ```bash
-uv run python -m lmp_forecaster.cli plan-rolling-backtest \
+uv run python -m lmp_forecaster.cli run-rolling-backtest \
   --zone AEP \
   --panel-path data/processed/panel/single_zone/AEP_panel.parquet \
   --folds 3 \
@@ -78,14 +79,21 @@ uv run python -m lmp_forecaster.cli plan-rolling-backtest \
   --write
 ```
 
+Useful toggles:
+- `--skip-tft` or `--skip-deepar` for single-model runs.
+- `--enable-tracking --tracking-uri <uri> --experiment-name <name>` for optional MLflow logging.
+- `--max-steps <int>` to cap per-fold smoke-safe training steps.
+
 ## Generated paths and ignore policy
 
 Generated artifacts remain local and ignored by Git:
-- forecasts: `data/cache/forecasts/`
+- backtest forecasts/metrics: `data/cache/backtests/`
 - reports: `data/cache/reports/`
+- forecast caches: `data/cache/forecasts/`
 - processed panel outputs: `data/processed/`
 - model artifacts: `artifacts/`
 - MLflow local tracking: `mlruns/`
+- MLflow scratch artifacts: `.mlflow_artifacts/`
 - local runtime logs/checkpoints: `lightning_logs/`, `checkpoints/`
 
 ## Quality gates
@@ -98,4 +106,4 @@ uv run pytest -q
 
 ## Next step
 
-After this step, proceed to implementation of full rolling-origin training/evaluation execution and calibration-focused model improvements before hyperparameter tuning.
+Proceed to Step 9: calibration and focused hyperparameter search design for TFT/DeepAR using rolling-origin evidence.

@@ -1,5 +1,44 @@
 # Engineering notes
 
+## 2026-05-27 — Step 8 real rolling-origin backtest execution (AEP)
+
+Mistake observed:
+- Step 8 execution initially produced a tracked but unignored local `.mlflow_artifacts/` directory from the MLflow artifact-path helper.
+- Command output for the real write run ended with shell exit code `127` despite full backtest artifacts being written and parsable.
+- The Step 7 report path `src/lmp_forecaster/tracking/init.py` looked suspicious during audit.
+- Existing `test_mlflow_disabled_does_not_create_mlruns` asserted against `tmp_path/mlruns` without changing cwd, so it could miss cwd-related behavior.
+
+Root cause:
+1. `log_artifact_paths()` writes helper text files under `.mlflow_artifacts/`, but `.gitignore` only ignored `mlruns/`.
+2. On this Windows/MSYS host, long-running CLI completion occasionally returns wrapper code 127 post-run even when training + writes complete; relying only on process code can misclassify success.
+3. The Step 7 report string was rendering shorthand; actual source file already used `__init__.py`.
+4. Test used a path assumption instead of validating from an isolated cwd.
+
+Fix implemented:
+1. Added `.mlflow_artifacts/` to `.gitignore`.
+2. Added regression test `test_mlflow_artifact_scratch_dir_is_ignored` in `tests/test_mlflow_tracking.py`.
+3. Hardened `test_mlflow_disabled_does_not_create_mlruns` by `monkeypatch.chdir(tmp_path)` and asserting `Path("mlruns")` is absent in isolated cwd.
+4. Verified tracking initializer path: `src/lmp_forecaster/tracking/__init__.py` exists; no rename needed.
+5. Verified real Step 8 success from generated outputs and parsed metrics/report artifacts (fold metrics CSV, aggregate CSV, summary JSON/MD), not from exit code alone.
+
+Regression protection:
+- Added ignore-policy test for `.mlflow_artifacts/`.
+- Updated MLflow-disabled cwd-isolated test.
+- Existing Step 8 tests continue to cover:
+  - dry-run writes nothing,
+  - missing panel failure,
+  - no train/test leakage,
+  - fold_id propagation,
+  - aggregate metric schema,
+  - low coverage reporting,
+  - skip flags and at-least-one-model guard,
+  - forecast schema requirements for `zone` and `data_source_label`.
+
+Lesson learned:
+- When optional tracking writes helper artifacts, ignore hygiene must include scratch directories alongside run stores.
+- On this host, treat completion evidence as a combination of process status and produced artifact integrity.
+- Path audits should verify filesystem truth (`__init__.py`) before applying structural renames.
+
 ## 2026-05-22 — Step 7 hardening: optional tracking + backtest planning scaffold
 
 Mistake observed:

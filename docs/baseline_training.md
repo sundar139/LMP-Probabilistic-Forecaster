@@ -2,12 +2,13 @@
 
 ## Status
 
-- Real AEP single-zone baseline workflow is in place and reproducible.
-- Current TFT/DeepAR metrics are first-run untuned metrics and are not final benchmark claims.
-- Coverage is below desired calibration range for production confidence:
-  - TFT coverage_80 currently below the 70%-90% guide target.
-  - DeepAR coverage_80 is currently 0.0 (interval under-coverage/collapse behavior).
-- Next major objective is reliable rolling-origin evaluation before tuning.
+- Real AEP single-zone baseline workflow remains reproducible.
+- Rolling-origin AEP backtest execution is now implemented and has been run for TFT + DeepAR across 3 real folds.
+- Current TFT/DeepAR metrics remain first-run untuned metrics and are not final benchmark claims.
+- Coverage calibration remains weak:
+  - TFT coverage_80_mean = 0.5833 (under-coverage vs 80% target interval).
+  - DeepAR coverage_80_mean = 0.0000 (severe under-coverage / interval collapse behavior).
+- Next major objective is calibration + focused search, not broad tuning.
 
 ## Commands
 
@@ -38,20 +39,20 @@ uv run python -m lmp_forecaster.cli train-single-zone-baselines \
   --write
 ```
 
-Dry-run rolling-origin backtest planning:
+Dry-run rolling-origin backtest execution:
 
 ```bash
-uv run python -m lmp_forecaster.cli plan-rolling-backtest \
+uv run python -m lmp_forecaster.cli run-rolling-backtest \
   --zone AEP \
   --panel-path data/processed/panel/single_zone/AEP_panel.parquet \
   --folds 3 \
   --horizon-hours 24
 ```
 
-Write rolling-origin backtest plan reports:
+Write rolling-origin backtest execution outputs:
 
 ```bash
-uv run python -m lmp_forecaster.cli plan-rolling-backtest \
+uv run python -m lmp_forecaster.cli run-rolling-backtest \
   --zone AEP \
   --panel-path data/processed/panel/single_zone/AEP_panel.parquet \
   --folds 3 \
@@ -116,38 +117,48 @@ Safety behavior:
 - Secret-like params (keys containing token/key/secret/password/api/credential) are skipped from tracking logs.
 - Artifact logging records reference paths/metadata, not private secrets.
 
-## Rolling-origin planning scaffold
+## Rolling-origin evaluation execution
 
-Module: `src/lmp_forecaster/eval/backtest.py`
+Module: `src/lmp_forecaster/eval/backtest_runner.py`
 
 Includes:
-- `BacktestConfig`
-- `BacktestFold`
-- `make_rolling_origin_folds()`
-- `validate_backtest_folds()`
-- `summarize_backtest_plan()`
-- `write_backtest_plan()`
+- `BacktestRunConfig`
+- `BacktestFoldResult`
+- `RollingBacktestResult`
+- `run_single_fold_backtest()`
+- `run_rolling_backtest()`
+- `aggregate_backtest_metrics()`
+- `write_backtest_results()`
+- `load_backtest_panel()`
 
-Supported planning modes:
-- `expanding`
-- `rolling`
+Execution behavior:
+- Dry-run prints validated folds/settings/expected paths and writes nothing.
+- `--write` executes fold-by-fold training/evaluation and writes:
+  - forecasts parquet,
+  - per-fold metrics CSV,
+  - aggregate metrics CSV,
+  - summary JSON/Markdown,
+  - artifact manifest JSON.
 
-Fold checks enforce:
-- `train_end < test_start`
-- leakage check before origin
-- no overlapping test windows
-- minimum training history per fold
-- timezone preservation when present
+Coverage interpretation is explicit in reports:
+- not near 80% target -> under-coverage,
+- high above target -> over-coverage,
+- only near target -> roughly calibrated.
 
-This step plans folds only; it does not run full fold-by-fold model training.
+Current real AEP run evidence (3 folds, horizon 24):
+- TFT coverage_80_mean: 0.5833 (under-coverage)
+- DeepAR coverage_80_mean: 0.0000 (under-coverage/interval collapse)
+
 
 ## Artifact locations and ignore policy
 
 Generated outputs remain local and gitignored:
-- forecasts: `data/cache/forecasts/`
+- backtest outputs: `data/cache/backtests/`
 - reports: `data/cache/reports/`
 - baseline artifacts: `artifacts/baselines/`
+- backtest artifacts: `artifacts/backtests/`
 - tracking runs: `mlruns/`
+- tracking scratch artifacts: `.mlflow_artifacts/`
 
 ## Interpretation note
 

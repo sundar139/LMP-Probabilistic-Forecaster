@@ -1,0 +1,15 @@
+backtest:
+  zone: AEP
+  panel_path: data/processed/panel/single_zone/AEP_panel.parquet
+  folds: 3
+  horizon_hours: 24
+  min_train_hours: 2160
+  input_size_hours: 168
+  window_mode: expanding
+  models: [TFT, DeepAR]
+  max_steps: 30
+  seed: 42
+  enable_tracking: false
+  output_root: data/cache/backtests
+  report_root: data/cache/reports
+  artifact_root: artifacts/backtests

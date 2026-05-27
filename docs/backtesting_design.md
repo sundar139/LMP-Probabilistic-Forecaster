@@ -1,25 +1,25 @@
-# Rolling-origin backtest design scaffold
+# Rolling-origin backtest design and execution (AEP)
 
 ## Goal
 
-Prepare a reliable fold-planning scaffold for rolling-origin evaluation before expensive full backtest training.
+Run real rolling-origin evaluation on the real AEP panel for first baseline quality evidence, using fold planning plus fold-by-fold model execution.
 
 ## CLI
 
-Dry-run planning:
+Dry-run (planning only, no training, no writes, no tracking):
 
 ```bash
-uv run python -m lmp_forecaster.cli plan-rolling-backtest \
+uv run python -m lmp_forecaster.cli run-rolling-backtest \
   --zone AEP \
   --panel-path data/processed/panel/single_zone/AEP_panel.parquet \
   --folds 3 \
   --horizon-hours 24
 ```
 
-Write planning reports:
+Write execution (real fold training/evaluation + report output):
 
 ```bash
-uv run python -m lmp_forecaster.cli plan-rolling-backtest \
+uv run python -m lmp_forecaster.cli run-rolling-backtest \
   --zone AEP \
   --panel-path data/processed/panel/single_zone/AEP_panel.parquet \
   --folds 3 \
@@ -27,38 +27,83 @@ uv run python -m lmp_forecaster.cli plan-rolling-backtest \
   --write
 ```
 
-## Fold planning module
+Optional controls:
+- `--skip-tft` or `--skip-deepar`
+- `--enable-tracking --tracking-uri <uri> --experiment-name <name>`
+- `--max-steps <int>`
 
-`src/lmp_forecaster/eval/backtest.py` provides:
-- `BacktestConfig`
-- `BacktestFold`
-- `make_rolling_origin_folds()`
-- `validate_backtest_folds()`
-- `summarize_backtest_plan()`
-- `write_backtest_plan()`
+## Execution module
 
-## Supported planning modes
-
-- `expanding`
-- `rolling`
+`src/lmp_forecaster/eval/backtest_runner.py` includes:
+- `BacktestRunConfig`
+- `BacktestFoldResult`
+- `RollingBacktestResult`
+- `load_backtest_panel()`
+- `run_single_fold_backtest()`
+- `run_rolling_backtest()`
+- `aggregate_backtest_metrics()`
+- `write_backtest_results()`
+- `log_backtest_tracking()`
 
 ## Validation guarantees
 
-Each fold enforces:
-- `train_end < test_start`
-- no leakage at/after origin in training range
-- non-overlapping test windows
-- minimum train history before each fold
-- timezone preservation when panel timestamps are timezone-aware
+Per run:
+- panel existence validation with clear failure when missing,
+- real-data requirement check (`data_source_label=real`) for CLI execution,
+- rolling-origin fold planning/validation via `BacktestConfig` + `BacktestFold`.
 
-## Write behavior
+Per fold:
+- training rows strictly before fold origin,
+- test rows only in fold test window,
+- no leakage/overlap via fold validation,
+- quantile ordering validation (`p10 <= p50 <= p90`),
+- required forecast schema fields enforced.
 
-- Dry-run prints plan summary and writes nothing.
-- `--write` writes JSON/Markdown under ignored report paths:
-  - `data/cache/reports/backtest_plan_AEP_<timestamp>.json`
-  - `data/cache/reports/backtest_plan_AEP_<timestamp>.md`
+## Latest real run snapshot
 
-## Scope limits
+Configuration:
+- zone: AEP
+- models: TFT, DeepAR
+- folds: 3
+- horizon_hours: 24
+- min_train_hours: 2160
+- window_mode: expanding
+- max_steps: 30
+- accelerator selected: GPU (NVIDIA GeForce RTX 4070 Laptop GPU)
 
-This scaffold is planning-only for this step.
-It does not train models across all folds yet.
+Fold structure:
+- fold_id=1: train 2024-01-08 00:00:00-05:00 -> 2024-12-28 23:00:00-05:00, test 2024-12-29 00:00:00-05:00 -> 2024-12-29 23:00:00-05:00, train_rows=8544, test_rows=24
+- fold_id=2: train 2024-01-08 00:00:00-05:00 -> 2024-12-29 23:00:00-05:00, test 2024-12-30 00:00:00-05:00 -> 2024-12-30 23:00:00-05:00, train_rows=8568, test_rows=24
+- fold_id=3: train 2024-01-08 00:00:00-05:00 -> 2024-12-30 23:00:00-05:00, test 2024-12-31 00:00:00-05:00 -> 2024-12-31 23:00:00-05:00, train_rows=8592, test_rows=24
+
+Aggregate metrics (first real untuned rolling run):
+
+| model | folds_completed | total_test_rows | MAE_mean | RMSE_mean | mean_pinball_loss_mean | coverage_80_mean | interval_width_mean | data_source_label |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| TFT | 3 | 72 | 5.5506 | 6.2262 | 1.8597 | 0.5833 | 13.4750 | real |
+| DeepAR | 3 | 72 | 21.9064 | 22.4298 | 10.2479 | 0.0000 | 5.0474 | real |
+
+Coverage interpretation:
+- TFT coverage_80_mean=0.5833: under-coverage.
+- DeepAR coverage_80_mean=0.0000: severe under-coverage/interval collapse behavior.
+
+## Output paths
+
+Generated outputs are written under ignored paths only:
+- `data/cache/backtests/`
+- `data/cache/reports/`
+- `artifacts/backtests/`
+
+## Limits and cautions
+
+- single-zone only (AEP),
+- untuned model settings,
+- short fold count (3),
+- no hyperparameter search yet,
+- no multi-zone training yet.
+
+These results are baseline evidence, not final benchmark claims.
+
+## Next step
+
+Step 9: calibration and focused hyperparameter search design for TFT/DeepAR.

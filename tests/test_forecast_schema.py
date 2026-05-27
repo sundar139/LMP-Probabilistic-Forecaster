@@ -82,3 +82,39 @@ def test_quantile_validation_requires_extended_schema() -> None:
 
     with pytest.raises(ValueError, match="Missing required forecast columns"):
         validate_quantile_forecast(frame)
+
+
+def test_quantile_validation_requires_zone_column() -> None:
+    frame = pd.DataFrame(
+        {
+            "unique_id": ["AEP"],
+            "ds": [pd.Timestamp("2024-01-01 00:00:00", tz="America/New_York")],
+            "p10": [9.0],
+            "p50": [10.0],
+            "p90": [11.0],
+            "model": ["TFT"],
+            "generated_at": [pd.Timestamp("2026-01-01T00:00:00Z")],
+            "data_source_label": ["real"],
+        }
+    )
+
+    with pytest.raises(ValueError, match="Missing required forecast columns"):
+        validate_quantile_forecast(frame)
+
+
+def test_quantile_validation_requires_data_source_label_column() -> None:
+    frame = pd.DataFrame(
+        {
+            "unique_id": ["AEP"],
+            "ds": [pd.Timestamp("2024-01-01 00:00:00", tz="America/New_York")],
+            "p10": [9.0],
+            "p50": [10.0],
+            "p90": [11.0],
+            "model": ["TFT"],
+            "generated_at": [pd.Timestamp("2026-01-01T00:00:00Z")],
+            "zone": ["AEP"],
+        }
+    )
+
+    with pytest.raises(ValueError, match="Missing required forecast columns"):
+        validate_quantile_forecast(frame)

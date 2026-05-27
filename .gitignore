@@ -37,6 +37,7 @@ reports/
 
 # Experiment tracking
 mlruns/
+.mlflow_artifacts/
 lightning_logs/
 checkpoints/
 *.ckpt
