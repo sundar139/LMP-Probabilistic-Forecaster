@@ -1,0 +1,9 @@
+search_design:
+  max_trials_first_pass: 12
+  max_trials_second_pass: 30
+  timeout_minutes_first_pass: 45
+  primary_metric: mean_pinball_loss
+  secondary_metric: coverage_80
+  promotion_coverage_min: 0.70
+  promotion_coverage_max: 0.90
+  promotion_mae_regression_limit: 0.15

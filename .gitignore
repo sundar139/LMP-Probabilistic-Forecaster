@@ -57,6 +57,12 @@ data/.dvc/
 *.swp
 *.swo
 
+# Repo-local agent memory mirrors
+.agent-memory/
+AGENT_MEMORY*.md
+.hermes-memory*.md
+.codex-memory*.md
+
 # OS
 .DS_Store
 Thumbs.db

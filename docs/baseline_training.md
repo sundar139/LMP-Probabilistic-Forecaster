@@ -150,6 +150,34 @@ Current real AEP run evidence (3 folds, horizon 24):
 - DeepAR coverage_80_mean: 0.0000 (under-coverage/interval collapse)
 
 
+## Rolling-origin calibration diagnostics + focused search design
+
+Step 9 adds calibration diagnostics and search-design-only outputs (no large tuning yet).
+
+Diagnostics commands:
+
+```bash
+uv run python -m lmp_forecaster.cli analyze-calibration --zone AEP
+uv run python -m lmp_forecaster.cli analyze-calibration --zone AEP --write
+```
+
+Search design commands:
+
+```bash
+uv run python -m lmp_forecaster.cli design-focused-search --zone AEP
+uv run python -m lmp_forecaster.cli design-focused-search --zone AEP --write
+```
+
+Calibration evidence from rolling outputs:
+- TFT remains under-covered relative to 80% target coverage.
+- DeepAR remains severely under-covered with interval collapse warning behavior.
+
+Search design intentionally limits cost and scope:
+- first pass trial budget: 12,
+- second pass cap: 30,
+- no full broad Optuna run in this step,
+- promotion gate requires coverage recovery plus bounded MAE regression.
+
 ## Artifact locations and ignore policy
 
 Generated outputs remain local and gitignored:

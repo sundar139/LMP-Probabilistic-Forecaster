@@ -46,4 +46,4 @@ Leakage and overlap checks passed for planned folds.
 
 ## Suggested next step
 
-Step 9: calibration and focused hyperparameter search design for TFT/DeepAR.
+Step 10: execute a small focused search pass (Optuna or constrained manual grid) using the generated search design, then compare promotion-gated candidates against Step 8 baselines.

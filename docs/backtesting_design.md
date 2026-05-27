@@ -104,6 +104,38 @@ Generated outputs are written under ignored paths only:
 
 These results are baseline evidence, not final benchmark claims.
 
+## Calibration diagnostics and focused search design
+
+Step 9 adds:
+- calibration diagnostics module: `src/lmp_forecaster/eval/calibration.py`
+- focused search design module: `src/lmp_forecaster/tuning/search_design.py`
+- CLI commands:
+  - `analyze-calibration`
+  - `design-focused-search`
+
+Diagnostics from Step 8 rolling outputs confirm:
+- TFT: under-coverage (`coverage_80=0.5833`) with wider intervals than DeepAR but still below target.
+- DeepAR: severe under-coverage (`coverage_80=0.0000`) and interval collapse warning.
+
+Search design outputs intentionally avoid large tuning at this stage:
+- first pass: 12 trials (small budget)
+- second pass cap: 30
+- primary metric: `mean_pinball_loss`
+- secondary metric: `coverage_80`
+- promotion gate:
+  - coverage in `[0.70, 0.90]`
+  - no collapse warning (DeepAR)
+  - <= 15% MAE regression vs baseline
+
+CLI examples:
+
+```bash
+uv run python -m lmp_forecaster.cli analyze-calibration --zone AEP
+uv run python -m lmp_forecaster.cli analyze-calibration --zone AEP --write
+uv run python -m lmp_forecaster.cli design-focused-search --zone AEP
+uv run python -m lmp_forecaster.cli design-focused-search --zone AEP --write
+```
+
 ## Next step
 
-Step 9: calibration and focused hyperparameter search design for TFT/DeepAR.
+Step 10: execute a small focused search pass (Optuna or constrained manual grid) using the generated search design and promotion gates from Step 9 diagnostics.

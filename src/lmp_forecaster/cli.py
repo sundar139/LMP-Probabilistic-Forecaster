@@ -66,6 +66,12 @@ from lmp_forecaster.eval.backtest_runner import (
     run_rolling_backtest,
     write_backtest_results,
 )
+from lmp_forecaster.eval.calibration import (
+    discover_latest_backtest_outputs,
+    load_calibration_config,
+    summarize_calibration_diagnostics,
+    write_calibration_report,
+)
 from lmp_forecaster.eval.data_quality import (
     build_weather_quality_report,
     write_weather_quality_report,
@@ -75,6 +81,12 @@ from lmp_forecaster.models.baselines import (
     BaselineTrainingConfig,
     load_training_config,
     train_single_zone_baselines,
+)
+from lmp_forecaster.tuning.search_design import (
+    discover_latest_calibration_report,
+    load_search_design_config,
+    recommend_search_strategy,
+    write_search_design,
 )
 
 app = typer.Typer(help="LMP forecaster CLI")
@@ -861,6 +873,164 @@ def run_rolling_backtest_command(
     print(f"Summary Markdown: {paths['summary_markdown']}")
     print(f"Manifest: {paths['manifest']}")
     print(f"Tracking status: {tracking_status}")
+
+
+@app.command("analyze-calibration")
+def analyze_calibration_command(
+    zone: Annotated[str, typer.Option(help="Zone code, defaults to AEP.")] = "AEP",
+    forecasts_path: Annotated[
+        Path | None,
+        typer.Option(help="Optional rolling backtest forecasts parquet path."),
+    ] = None,
+    fold_metrics_path: Annotated[
+        Path | None,
+        typer.Option(help="Optional rolling fold metrics CSV path."),
+    ] = None,
+    aggregate_metrics_path: Annotated[
+        Path | None,
+        typer.Option(help="Optional rolling aggregate metrics CSV path."),
+    ] = None,
+    write: Annotated[
+        bool,
+        typer.Option(help="Write calibration diagnostics reports when set."),
+    ] = False,
+) -> None:
+    """Analyze interval calibration diagnostics from rolling-origin forecast outputs."""
+    cfg = load_calibration_config()
+    zone_u = zone.upper()
+
+    discovered = discover_latest_backtest_outputs(zone_u)
+    resolved_forecasts = forecasts_path or discovered.get("forecasts")
+    resolved_fold_metrics = fold_metrics_path or discovered.get("fold_metrics")
+    resolved_aggregate_metrics = aggregate_metrics_path or discovered.get("aggregate_metrics")
+
+    if resolved_forecasts is None:
+        print(
+            "No rolling backtest forecasts found. Run run-rolling-backtest --write before "
+            "analyze-calibration."
+        )
+        raise typer.Exit(code=2)
+
+    try:
+        forecasts = pd.read_parquet(resolved_forecasts)
+    except Exception as exc:
+        print(f"Failed to read forecasts parquet: {resolved_forecasts}")
+        print(str(exc))
+        raise typer.Exit(code=2) from exc
+
+    summary = summarize_calibration_diagnostics(forecasts, cfg=cfg, zone=zone_u)
+
+    print("[bold]Calibration diagnostics[/bold]")
+    print(f"Zone: {zone_u}")
+    print(f"Forecasts path: {resolved_forecasts}")
+    if resolved_fold_metrics is not None:
+        print(f"Fold metrics path: {resolved_fold_metrics}")
+    if resolved_aggregate_metrics is not None:
+        print(f"Aggregate metrics path: {resolved_aggregate_metrics}")
+    print(f"Rows analyzed: {summary['rows_analyzed']}")
+    print(f"Target coverage: {summary['target_coverage']:.2f} ± {summary['tolerance']:.2f}")
+
+    for row in summary.get("model_summary", []):
+        model = row.get("model")
+        coverage = float(row.get("coverage_80", 0.0))
+        width = float(row.get("interval_width_mean", 0.0))
+        crossing = float(row.get("crossing_rate", 0.0))
+        median_bias = float(row.get("median_bias_mean", 0.0))
+        status = row.get("calibration_status")
+        note = row.get("classification_note")
+        print(
+            f"- {model}: coverage_80={coverage:.4f}, interval_width_mean={width:.4f}, "
+            f"crossing_rate={crossing:.4f}, median_bias={median_bias:.4f}, "
+            f"status={status}, note={note}"
+        )
+
+    if not write:
+        print("Dry-run only. Re-run with --write to persist calibration diagnostics reports.")
+        return
+
+    json_path, md_path = write_calibration_report(summary, zone=zone_u)
+    print(f"Calibration diagnostics JSON: {json_path}")
+    print(f"Calibration diagnostics Markdown: {md_path}")
+
+
+@app.command("design-focused-search")
+def design_focused_search_command(
+    zone: Annotated[str, typer.Option(help="Zone code, defaults to AEP.")] = "AEP",
+    diagnostics_path: Annotated[
+        Path | None,
+        typer.Option(help="Optional calibration diagnostics JSON path."),
+    ] = None,
+    write: Annotated[
+        bool,
+        typer.Option(help="Write focused search design reports when set."),
+    ] = False,
+) -> None:
+    """Design focused TFT/DeepAR search spaces from calibration diagnostics."""
+    zone_u = zone.upper()
+    search_cfg = load_search_design_config()
+
+    resolved_diag = diagnostics_path or discover_latest_calibration_report(zone_u)
+    diagnostics: dict[str, object]
+
+    if resolved_diag is not None:
+        try:
+            import json
+
+            loaded = json.loads(Path(resolved_diag).read_text(encoding="utf-8"))
+            if not isinstance(loaded, dict):
+                raise ValueError("Diagnostics JSON must parse to object mapping")
+            diagnostics = loaded
+        except Exception as exc:
+            print(f"Failed to load diagnostics JSON: {resolved_diag}")
+            print(str(exc))
+            raise typer.Exit(code=2) from exc
+    else:
+        discovered = discover_latest_backtest_outputs(zone_u)
+        forecasts_path = discovered.get("forecasts")
+        if forecasts_path is None:
+            print(
+                "No calibration diagnostics or rolling backtest forecasts found. Run "
+                "run-rolling-backtest --write and analyze-calibration first."
+            )
+            raise typer.Exit(code=2)
+        try:
+            forecasts = pd.read_parquet(forecasts_path)
+        except Exception as exc:
+            print(f"Failed to read forecasts parquet: {forecasts_path}")
+            print(str(exc))
+            raise typer.Exit(code=2) from exc
+        diagnostics = summarize_calibration_diagnostics(
+            forecasts,
+            cfg=load_calibration_config(),
+            zone=zone_u,
+        )
+        resolved_diag = forecasts_path
+
+    strategy = recommend_search_strategy(diagnostics, search_cfg)
+
+    print("[bold]Focused search design[/bold]")
+    print(f"Zone: {zone_u}")
+    print(f"Diagnostics source: {resolved_diag}")
+    print(
+        "Strategy: "
+        f"first_pass_trials={strategy['strategy']['first_pass_trials']}, "
+        f"second_pass_trials={strategy['strategy']['second_pass_trials']}, "
+        f"primary_metric={strategy['strategy']['primary_metric']}, "
+        f"secondary_metric={strategy['strategy']['secondary_metric']}"
+    )
+
+    for model in ["TFT", "DeepAR"]:
+        space = strategy.get("spaces", {}).get(model, {})
+        print(f"- {model}: {space.get('objective_focus', '')}")
+        print(f"  recommended_first_search_size={space.get('recommended_first_search_size')}")
+
+    if not write:
+        print("Dry-run only. Re-run with --write to persist focused search design reports.")
+        return
+
+    json_path, md_path = write_search_design(strategy, zone=zone_u)
+    print(f"Focused search design JSON: {json_path}")
+    print(f"Focused search design Markdown: {md_path}")
 
 
 @app.command("inspect-pjm-api")

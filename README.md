@@ -4,14 +4,15 @@ Local-first probabilistic forecasting for PJM day-ahead hourly zonal LMPs.
 
 ## Current status
 
-Implemented and validated through Step 8 foundation pass:
+Implemented and validated through Step 9 foundation pass:
 - real AEP single-zone baseline workflow from Step 6 remains reproducible,
-- optional MLflow tracking layer added (disabled by default),
-- baseline training config hardened with stricter validation,
-- rolling-origin planning scaffold from Step 7 is now extended to real fold execution,
-- real rolling-origin AEP backtest execution completed for TFT and DeepAR across 3 folds.
+- optional MLflow tracking layer remains available (disabled by default),
+- real rolling-origin AEP backtest execution completed for TFT and DeepAR across 3 folds,
+- calibration diagnostics module now summarizes coverage/width/crossing/bias from rolling forecasts,
+- focused TFT/DeepAR search design module now generates small, evidence-driven search spaces,
+- full Optuna search is intentionally deferred to the next step.
 
-Current real AEP metrics are first-run untuned metrics and are not final benchmark claims.
+Current real AEP metrics and calibration diagnostics are untuned baseline evidence, not final benchmark claims.
 
 ## Real AEP baseline evidence snapshot
 
@@ -96,7 +97,36 @@ Generated artifacts remain local and ignored by Git:
 - MLflow scratch artifacts: `.mlflow_artifacts/`
 - local runtime logs/checkpoints: `lightning_logs/`, `checkpoints/`
 
-## Quality gates
+## Calibration diagnostics and focused search design commands
+
+Calibration diagnostics dry-run (reads latest rolling outputs, writes nothing):
+
+```bash
+uv run python -m lmp_forecaster.cli analyze-calibration --zone AEP
+```
+
+Calibration diagnostics write-mode:
+
+```bash
+uv run python -m lmp_forecaster.cli analyze-calibration --zone AEP --write
+```
+
+Focused search design dry-run:
+
+```bash
+uv run python -m lmp_forecaster.cli design-focused-search --zone AEP
+```
+
+Focused search design write-mode:
+
+```bash
+uv run python -m lmp_forecaster.cli design-focused-search --zone AEP --write
+```
+
+Rationale:
+- TFT remains under-covered and needs calibration-oriented adjustments.
+- DeepAR shows interval collapse behavior and needs targeted distribution/calibration recovery.
+- This step produces design artifacts only; it does not run large tuning.
 
 ```bash
 uv run ruff check .
@@ -106,4 +136,4 @@ uv run pytest -q
 
 ## Next step
 
-Proceed to Step 9: calibration and focused hyperparameter search design for TFT/DeepAR using rolling-origin evidence.
+Proceed to Step 10: execute a small focused search pass for TFT and DeepAR using the generated diagnostics and search design reports; keep scope single-zone AEP and avoid broad tuning.

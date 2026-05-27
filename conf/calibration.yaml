@@ -1,0 +1,7 @@
+calibration:
+  target_coverage: 0.80
+  tolerance: 0.05
+  lower_quantile: 0.10
+  median_quantile: 0.50
+  upper_quantile: 0.90
+  collapse_coverage_threshold: 0.05
