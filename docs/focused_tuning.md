@@ -25,21 +25,25 @@ A previous write-mode tuning attempt froze/timed out under heavier settings. Bec
 
 ## Config profile
 
-`conf/tuning.yaml` defines a local profile:
+`conf/tuning.yaml` defines explicit resource profiles:
 
-- `resource_profile.name: local_8gb_vram_16gb_ram`
-- `max_trials_safe: 2`
-- `folds_safe: 1`
-- `max_steps_cap_safe: 3`
-- `batch_size_safe: 4`
-- `num_workers: 0`
-- `cleanup_after_trial: true`
-- `full_search_deferred: true`
+- `local_safe`
+  - local laptop-safe profile for 8GB VRAM / 16GB RAM
+  - `max_trials=2`
+  - `folds=1`
+  - `max_steps_cap=3`
+  - `batch_size=4`
+  - `num_workers=0`
+  - `cleanup_after_trial=true`
+  - `allow_heavy_run=false`
+- `cloud_16gb`
+  - intended external runner profile for 16GB VRAM class hardware
+  - `max_trials=12`, `folds=2`, `max_steps_cap=50`, `batch_size=8`
+- `cloud_24gb`
+  - intended external runner profile for 24GB+ VRAM class hardware
+  - `max_trials=30`, `folds=3`, `max_steps_cap=100`, `batch_size=16`
 
-The larger first pass remains documented but deferred:
-- `max_trials_first_pass: 12`
-- `folds_for_full_first_pass: 2`
-- `status: deferred_on_local_machine`
+The larger first pass remains documented but deferred on this machine.
 
 ## Commands
 
@@ -113,6 +117,7 @@ These paths remain git-ignored.
 ## Recommended next step
 
 For meaningful promotion decisions:
-1. Run a slightly larger focused search on cloud or stronger GPU hardware.
-2. Re-run multi-fold rolling backtest on any candidate.
-3. Only then consider final promotion.
+1. Run external tuning with `export-tuning-package` using `cloud_16gb` or `cloud_24gb`.
+2. Import ranked candidates back with `import-tuning-results`.
+3. Re-run 3-fold rolling backtest on the best imported candidate only.
+4. Promote only if local recomputed gates pass and rolling validation confirms stability.

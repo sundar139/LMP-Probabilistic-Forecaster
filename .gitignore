@@ -30,6 +30,7 @@ data/raw/**
 data/cache/**
 !data/cache/.gitkeep
 data/cache/tuning/**
+data/cache/tuning_packages/**
 data/cache/reports/**
 data/processed/**
 !data/processed/.gitkeep

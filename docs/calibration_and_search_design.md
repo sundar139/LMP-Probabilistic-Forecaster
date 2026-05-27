@@ -25,12 +25,21 @@ Step 10 closeout executes only a hardware-safe smoke scope on this machine.
   - stop and promotion criteria
 - `src/lmp_forecaster/tuning/tuning_runner.py`
   - local-safe profile enforcement
+  - cloud resource profiles for external tuning package plans (`cloud_16gb`, `cloud_24gb`)
   - heavy-run guard for trial/fold/step limits
   - cleanup-after-trial hooks and runtime accounting
   - resource-limited failure handling (including CUDA OOM classification)
+- `src/lmp_forecaster/tuning/package.py`
+  - portable tuning package manifest generation
+  - command plan and promotion gate export
+  - manifest secret/path hygiene checks
+- `src/lmp_forecaster/tuning/result_import.py`
+  - ranked candidate schema validation
+  - local promotion recompute against baseline metrics
+  - mismatch detection for imported vs recomputed status
 - CLI commands:
-  - `analyze-calibration`
-  - `design-focused-search`
+  - `export-tuning-package`
+  - `import-tuning-results`
   - `run-focused-tuning` with `--resource-profile local_safe` and `--allow-heavy-run`
 
 ## Commands
@@ -41,7 +50,9 @@ uv run python -m lmp_forecaster.cli analyze-calibration --zone AEP --write
 uv run python -m lmp_forecaster.cli design-focused-search --zone AEP
 uv run python -m lmp_forecaster.cli design-focused-search --zone AEP --write
 uv run python -m lmp_forecaster.cli run-focused-tuning --zone AEP --resource-profile local_safe --max-trials 2 --folds 1 --max-steps-cap 3 --skip-deepar
-uv run python -m lmp_forecaster.cli run-focused-tuning --zone AEP --resource-profile local_safe --max-trials 2 --folds 1 --max-steps-cap 3 --skip-deepar --write
+uv run python -m lmp_forecaster.cli export-tuning-package --zone AEP --resource-profile cloud_16gb --models TFT,DeepAR --max-trials 12 --folds 2
+uv run python -m lmp_forecaster.cli export-tuning-package --zone AEP --resource-profile cloud_24gb --models TFT,DeepAR --max-trials 30 --folds 3
+uv run python -m lmp_forecaster.cli import-tuning-results --zone AEP --ranked-candidates-path <ranked_candidates_csv>
 ```
 
 ## Local hardware profile used for closeout
@@ -93,4 +104,4 @@ For this local closeout run, promotion summary was `no_promotion` with coverage 
 
 ## Recommended next step
 
-Run slightly larger focused tuning on cloud/stronger GPU, then run multi-fold rolling backtest on any candidate before considering promotion.
+Run external package execution with `cloud_16gb` or `cloud_24gb`, import ranked candidates locally, and run 3-fold rolling backtest for the best imported candidate before any promotion.

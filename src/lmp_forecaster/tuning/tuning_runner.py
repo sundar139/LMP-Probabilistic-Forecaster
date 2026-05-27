@@ -8,7 +8,7 @@ import math
 import shutil
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -50,19 +50,96 @@ from lmp_forecaster.tuning.promotion import (
 
 @dataclass(frozen=True)
 class ResourceProfile:
-    name: str = "local_8gb_vram_16gb_ram"
-    max_trials_safe: int = 2
-    folds_safe: int = 1
-    max_steps_cap_safe: int = 3
-    batch_size_safe: int = 4
+    name: str
+    description: str
+    max_trials: int
+    folds: int
+    max_steps_cap: int
+    batch_size: int
     num_workers: int = 0
+    enable_checkpointing: bool = False
+    enable_mlflow_by_default: bool = False
+    cleanup_after_trial: bool = True
+    allow_heavy_run: bool = False
     prefer_gpu: bool = True
     allow_cpu_fallback: bool = True
-    disable_checkpoints: bool = True
-    disable_rich_progress: bool = True
-    cleanup_after_trial: bool = True
     max_disk_gb_for_generated_outputs: float = 5.0
-    full_search_deferred: bool = True
+    full_search_deferred: bool = False
+
+    @property
+    def max_trials_safe(self) -> int:
+        return self.max_trials
+
+    @property
+    def folds_safe(self) -> int:
+        return self.folds
+
+    @property
+    def max_steps_cap_safe(self) -> int:
+        return self.max_steps_cap
+
+    @property
+    def batch_size_safe(self) -> int:
+        return self.batch_size
+
+
+DEFAULT_RESOURCE_PROFILES: dict[str, ResourceProfile] = {
+    "local_safe": ResourceProfile(
+        name="local_8gb_vram_16gb_ram",
+        description="Local laptop-safe profile for 8GB VRAM / 16GB RAM",
+        max_trials=2,
+        folds=1,
+        max_steps_cap=3,
+        batch_size=4,
+        num_workers=0,
+        enable_checkpointing=False,
+        enable_mlflow_by_default=False,
+        cleanup_after_trial=True,
+        allow_heavy_run=False,
+        prefer_gpu=True,
+        allow_cpu_fallback=True,
+        max_disk_gb_for_generated_outputs=5.0,
+        full_search_deferred=True,
+    ),
+    "cloud_16gb": ResourceProfile(
+        name="cloud_16gb_vram_profile",
+        description="Moderate cloud GPU profile, intended for 16GB VRAM",
+        max_trials=12,
+        folds=2,
+        max_steps_cap=50,
+        batch_size=8,
+        num_workers=0,
+        enable_checkpointing=False,
+        enable_mlflow_by_default=True,
+        cleanup_after_trial=True,
+        allow_heavy_run=True,
+        prefer_gpu=True,
+        allow_cpu_fallback=False,
+        max_disk_gb_for_generated_outputs=50.0,
+        full_search_deferred=False,
+    ),
+    "cloud_24gb": ResourceProfile(
+        name="cloud_24gb_vram_profile",
+        description="Larger cloud GPU profile, intended for 24GB+ VRAM",
+        max_trials=30,
+        folds=3,
+        max_steps_cap=100,
+        batch_size=16,
+        num_workers=0,
+        enable_checkpointing=True,
+        enable_mlflow_by_default=True,
+        cleanup_after_trial=False,
+        allow_heavy_run=True,
+        prefer_gpu=True,
+        allow_cpu_fallback=False,
+        max_disk_gb_for_generated_outputs=100.0,
+        full_search_deferred=False,
+    ),
+}
+
+
+def _default_resource_profiles() -> dict[str, ResourceProfile]:
+    return dict(DEFAULT_RESOURCE_PROFILES)
 
 
 @dataclass(frozen=True)
@@ -91,7 +168,7 @@ class TuningRunConfig:
     num_workers: int = 0
     cpu_only: bool = False
     cleanup_after_trial: bool = True
-    resource_profile: str | None = None
+    resource_profile: str = "default"
     allow_heavy_run: bool = False
     use_optuna: bool = False
     optuna_storage_path: Path | None = None
@@ -103,7 +180,12 @@ class TuningRunConfig:
     output_root: Path = Path("data/cache/tuning")
     report_root: Path = Path("data/cache/reports")
     artifact_root: Path = Path("artifacts/tuning")
-    profile: ResourceProfile = ResourceProfile()
+    profile: ResourceProfile = field(
+        default_factory=lambda: DEFAULT_RESOURCE_PROFILES["local_safe"]
+    )
+    resource_profiles: dict[str, ResourceProfile] = field(
+        default_factory=_default_resource_profiles
+    )
 
     def validate(self) -> None:
         if self.max_trials <= 0:
@@ -137,26 +219,35 @@ class TuningRunConfig:
         if not self.enabled_models:
             raise ValueError("At least one model must run.")
 
+        if (
+            self.resource_profile not in {"default", ""}
+            and self.resource_profile not in self.resource_profiles
+        ):
+            raise ValueError(
+                f"Unknown resource_profile '{self.resource_profile}'. "
+                f"Expected one of {sorted(self.resource_profiles)}"
+            )
+
         if self.resource_profile == "local_safe" and not self.allow_heavy_run:
-            if self.max_trials > self.profile.max_trials_safe:
+            if self.max_trials > self.profile.max_trials:
                 raise ValueError(
-                    "local_safe profile refused heavy run: max_trials exceeds safe limit. "
-                    "Use --allow-heavy-run to override."
+                    f"{self.resource_profile} profile refused heavy run: "
+                    "max_trials exceeds profile limit. Use --allow-heavy-run to override."
                 )
-            if self.folds > self.profile.folds_safe:
+            if self.folds > self.profile.folds:
                 raise ValueError(
-                    "local_safe profile refused heavy run: folds exceeds safe limit. "
-                    "Use --allow-heavy-run to override."
+                    f"{self.resource_profile} profile refused heavy run: "
+                    "folds exceeds profile limit. Use --allow-heavy-run to override."
                 )
-            if self.max_steps_cap > self.profile.max_steps_cap_safe:
+            if self.max_steps_cap > self.profile.max_steps_cap:
                 raise ValueError(
-                    "local_safe profile refused heavy run: max_steps_cap exceeds safe limit. "
-                    "Use --allow-heavy-run to override."
+                    f"{self.resource_profile} profile refused heavy run: "
+                    "max_steps_cap exceeds profile limit. Use --allow-heavy-run to override."
                 )
-            if self.batch_size is not None and self.batch_size > self.profile.batch_size_safe:
+            if self.batch_size is not None and self.batch_size > self.profile.batch_size:
                 raise ValueError(
-                    "local_safe profile refused heavy run: batch_size exceeds safe limit. "
-                    "Use --allow-heavy-run to override."
+                    f"{self.resource_profile} profile refused heavy run: "
+                    "batch_size exceeds profile limit. Use --allow-heavy-run to override."
                 )
 
     @property
@@ -175,9 +266,7 @@ class TuningRunConfig:
     def effective_batch_size(self) -> int:
         if self.batch_size is not None:
             return self.batch_size
-        if self.resource_profile == "local_safe":
-            return self.profile.batch_size_safe
-        return 32
+        return self.profile.batch_size
 
 
 @dataclass(frozen=True)
@@ -251,25 +340,46 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _profile_from_config(raw: dict[str, Any]) -> ResourceProfile:
-    rp = raw.get("resource_profile", {})
-    if not isinstance(rp, dict):
-        rp = {}
-    return ResourceProfile(
-        name=str(rp.get("name", "local_8gb_vram_16gb_ram")),
-        max_trials_safe=int(rp.get("max_trials_safe", 2)),
-        folds_safe=int(rp.get("folds_safe", 1)),
-        max_steps_cap_safe=int(rp.get("max_steps_cap_safe", 3)),
-        batch_size_safe=int(rp.get("batch_size_safe", 4)),
-        num_workers=int(rp.get("num_workers", 0)),
-        prefer_gpu=bool(rp.get("prefer_gpu", True)),
-        allow_cpu_fallback=bool(rp.get("allow_cpu_fallback", True)),
-        disable_checkpoints=bool(rp.get("disable_checkpoints", True)),
-        disable_rich_progress=bool(rp.get("disable_rich_progress", True)),
-        cleanup_after_trial=bool(rp.get("cleanup_after_trial", True)),
-        max_disk_gb_for_generated_outputs=float(rp.get("max_disk_gb_for_generated_outputs", 5)),
-        full_search_deferred=bool(rp.get("full_search_deferred", True)),
-    )
+def _profile_from_config(raw: dict[str, Any]) -> tuple[dict[str, ResourceProfile], str]:
+    section = raw.get("resource_profiles", {})
+    profiles = _default_resource_profiles()
+    fallback_profile = profiles.get("local_safe", next(iter(profiles.values())))
+
+    if isinstance(section, dict):
+        for key, payload in section.items():
+            if not isinstance(payload, dict):
+                continue
+            name = str(payload.get("name", key)).strip() or key
+            existing = profiles.get(key, fallback_profile)
+            max_trials = int(payload.get("max_trials", existing.max_trials))
+            folds = int(payload.get("folds", existing.folds))
+            max_steps_cap = int(payload.get("max_steps_cap", existing.max_steps_cap))
+            batch_size = int(payload.get("batch_size", existing.batch_size))
+            profiles[key] = ResourceProfile(
+                name=name,
+                description=str(payload.get("description", key)).strip() or key,
+                max_trials=max_trials,
+                folds=folds,
+                max_steps_cap=max_steps_cap,
+                batch_size=batch_size,
+                num_workers=int(payload.get("num_workers", 0)),
+                enable_checkpointing=bool(payload.get("enable_checkpointing", False)),
+                enable_mlflow_by_default=bool(payload.get("enable_mlflow_by_default", False)),
+                cleanup_after_trial=bool(payload.get("cleanup_after_trial", True)),
+                allow_heavy_run=bool(payload.get("allow_heavy_run", key != "local_safe")),
+                prefer_gpu=bool(payload.get("prefer_gpu", True)),
+                allow_cpu_fallback=bool(payload.get("allow_cpu_fallback", key == "local_safe")),
+                max_disk_gb_for_generated_outputs=float(
+                    payload.get(
+                        "max_disk_gb_for_generated_outputs",
+                        5.0 if key == "local_safe" else 50.0,
+                    )
+                ),
+                full_search_deferred=bool(payload.get("full_search_deferred", key == "local_safe")),
+            )
+
+    default_profile = "local_safe" if "local_safe" in profiles else next(iter(profiles.keys()))
+    return profiles, default_profile
 
 
 def load_tuning_config(config_path: Path | None = None) -> TuningRunConfig:
@@ -292,7 +402,28 @@ def load_tuning_config(config_path: Path | None = None) -> TuningRunConfig:
     if folds_value is None:
         folds_value = section.get("folds_for_tuning", 2)
 
-    profile = _profile_from_config(raw)
+    resource_profiles, default_profile_key = _profile_from_config(raw)
+    profile_setting = str(section.get("resource_profile", "default")).strip()
+    normalized_profile_setting = profile_setting.lower()
+
+    if normalized_profile_setting in {"", "default"}:
+        configured_profile_key = default_profile_key
+        resource_profile_value = "default"
+    elif normalized_profile_setting in resource_profiles:
+        configured_profile_key = normalized_profile_setting
+        resource_profile_value = normalized_profile_setting
+    else:
+        configured_profile_key = default_profile_key
+        resource_profile_value = "default"
+
+    profile = resource_profiles[configured_profile_key]
+
+    enable_tracking_setting = section.get("enable_tracking")
+    enable_tracking = (
+        profile.enable_mlflow_by_default
+        if enable_tracking_setting is None
+        else bool(enable_tracking_setting)
+    )
 
     cfg = TuningRunConfig(
         zone=str(section.get("zone", "AEP")).upper(),
@@ -320,7 +451,6 @@ def load_tuning_config(config_path: Path | None = None) -> TuningRunConfig:
         ),
         seed=int(section.get("seed", 42)),
         max_steps_cap=int(section.get("max_steps_cap", 60)),
-        enable_tracking=bool(section.get("enable_tracking", False)),
         timeout_minutes=(
             int(timeout_raw)
             if (timeout_raw := section.get("timeout_minutes")) is not None
@@ -330,6 +460,13 @@ def load_tuning_config(config_path: Path | None = None) -> TuningRunConfig:
         report_root=Path(str(section.get("report_root", "data/cache/reports"))),
         artifact_root=Path(str(section.get("artifact_root", "artifacts/tuning"))),
         profile=profile,
+        resource_profile=resource_profile_value,
+        allow_heavy_run=profile.allow_heavy_run,
+        cleanup_after_trial=profile.cleanup_after_trial,
+        num_workers=profile.num_workers,
+        batch_size=profile.batch_size,
+        enable_tracking=enable_tracking,
+        resource_profiles=resource_profiles,
     )
     cfg.validate()
     return cfg
@@ -663,8 +800,8 @@ def _trial_model_runner(
             if "batch_size" in sanitized_overrides
             else int(run_cfg.effective_batch_size)
         )
-        if run_cfg.resource_profile == "local_safe" and not run_cfg.allow_heavy_run:
-            override_batch_size = min(override_batch_size, run_cfg.profile.batch_size_safe)
+        if not run_cfg.allow_heavy_run and not run_cfg.profile.allow_heavy_run:
+            override_batch_size = min(override_batch_size, run_cfg.profile.batch_size)
         cfg_kwargs["batch_size"] = override_batch_size
         if "max_steps" in sanitized_overrides:
             cfg_kwargs["max_steps_smoke"] = int(sanitized_overrides["max_steps"])

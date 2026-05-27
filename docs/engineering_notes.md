@@ -1,5 +1,55 @@
 # Engineering notes
 
+## 2026-05-27 — Portable tuning package + import validation closeout
+
+Mistake observed:
+- New package/export/import workflow initially lacked dedicated regression tests for dry-run/write semantics and schema gate behavior.
+- Initial CLI write-path assertions expected absolute-style substrings and failed when test runner emitted relative ignored paths.
+- Ruff surfaced line-length violations in new CLI tests.
+- Existing policy test only checked file/folder names for forbidden wording and did not assert module/test-name coverage.
+- Package manifest python requirement string was stale relative to project Python constraint.
+
+Root cause:
+1. Step continuation added source modules first, but test/docs closeout lagged behind implementation scope.
+2. CLI tests were initially written with stricter absolute-path assumptions than actual CLI output contract.
+3. Quick test additions introduced long single-line fixture writes beyond configured style limit.
+4. Naming-policy regression checks were too narrow for module/test function identifiers.
+5. Manifest metadata default was not synchronized with `pyproject.toml` requirement.
+
+Fix implemented:
+1. Added focused Step 11 tests:
+   - `tests/test_tuning_package.py`
+   - `tests/test_tuning_result_import.py`
+   - `tests/test_cli_tuning_package.py`
+   - `tests/test_cli_tuning_import.py`
+   - updated `tests/test_tuning_config.py`
+   - updated `tests/test_agent_memory_policy.py`
+2. Added/updated scripts:
+   - `scripts/export_tuning_package.ps1`
+   - `scripts/import_tuning_results.ps1`
+   - both clear `PYTHONHOME/PYTHONPATH` and run dry-run first.
+3. Fixed test failures by aligning path assertions to ignored relative-root patterns and reformatting long lines to satisfy Ruff.
+4. Hardened package metadata:
+   - aligned package manifest python requirement to `>=3.12,<3.13`.
+   - made git commit/branch lookup run against discovered project root.
+5. Expanded docs:
+   - updated `README.md`
+   - updated `docs/focused_tuning.md`
+   - updated `docs/calibration_and_search_design.md`
+   - added `docs/portable_tuning_workflow.md`
+6. Expanded policy regression checks:
+   - naming guard now checks file/folder/module/test names for forbidden wording.
+   - ignore-policy test now includes `data/cache/tuning_packages/**`.
+
+Regression protection:
+- Export/import dry-run/write behavior covered by CLI tests.
+- Import schema, gate recompute, mismatch detection, under-coverage, collapse rejection, and valid acceptance covered by unit tests.
+- Naming/ignore policy safeguards extended to module and test identifiers.
+
+Lesson learned:
+- For portable external execution workflows, treat import-side local recompute and mismatch detection as first-class acceptance criteria, not optional checks.
+- Policy tests must validate naming constraints across modules and test symbols, not only filesystem entries.
+
 ## 2026-05-27 — Step 10 resource-safe focused tuning closeout
 
 Mistake observed:

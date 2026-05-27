@@ -24,17 +24,39 @@ tuning:
   artifact_root: artifacts/tuning
   seed: 42
 
-resource_profile:
-  name: local_8gb_vram_16gb_ram
-  max_trials_safe: 2
-  folds_safe: 1
-  max_steps_cap_safe: 3
-  batch_size_safe: 4
-  num_workers: 0
-  prefer_gpu: true
-  allow_cpu_fallback: true
-  disable_checkpoints: true
-  disable_rich_progress: true
-  cleanup_after_trial: true
-  max_disk_gb_for_generated_outputs: 5
-  full_search_deferred: true
+resource_profiles:
+  local_safe:
+    description: "Local laptop-safe profile for 8GB VRAM / 16GB RAM"
+    max_trials: 2
+    folds: 1
+    max_steps_cap: 3
+    batch_size: 4
+    num_workers: 0
+    enable_checkpointing: false
+    enable_mlflow_by_default: false
+    cleanup_after_trial: true
+    allow_heavy_run: false
+
+  cloud_16gb:
+    description: "Moderate cloud GPU profile, intended for 16GB VRAM"
+    max_trials: 12
+    folds: 2
+    max_steps_cap: 50
+    batch_size: 8
+    num_workers: 0
+    enable_checkpointing: false
+    enable_mlflow_by_default: true
+    cleanup_after_trial: true
+    allow_heavy_run: true
+
+  cloud_24gb:
+    description: "Larger cloud GPU profile, intended for 24GB+ VRAM"
+    max_trials: 30
+    folds: 3
+    max_steps_cap: 100
+    batch_size: 16
+    num_workers: 0
+    enable_checkpointing: true
+    enable_mlflow_by_default: true
+    cleanup_after_trial: false
+    allow_heavy_run: true

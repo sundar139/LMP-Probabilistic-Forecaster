@@ -82,6 +82,18 @@ from lmp_forecaster.models.baselines import (
     load_training_config,
     train_single_zone_baselines,
 )
+from lmp_forecaster.tuning.package import (
+    TuningPackageConfig,
+    collect_required_command_plan,
+    create_tuning_package,
+    validate_tuning_package,
+    write_tuning_package_manifest,
+)
+from lmp_forecaster.tuning.promotion import PromotionGate
+from lmp_forecaster.tuning.result_import import (
+    import_tuning_results,
+    write_import_validation_report,
+)
 from lmp_forecaster.tuning.search_design import (
     discover_latest_calibration_report,
     load_search_design_config,
@@ -1141,28 +1153,40 @@ def run_focused_tuning_command(
         raise typer.BadParameter("--models must include at least one model name")
 
     profile_key = resource_profile.strip().lower()
-    profile_name = "local_safe" if profile_key in {"local_safe", "local-safe"} else "default"
+    if profile_key in {"", "default"}:
+        selected_profile_key = "local_safe"
+    elif profile_key in {"local_safe", "local-safe"}:
+        selected_profile_key = "local_safe"
+    elif profile_key in default_cfg.resource_profiles:
+        selected_profile_key = profile_key
+    else:
+        options = ", ".join(sorted(default_cfg.resource_profiles))
+        raise typer.BadParameter(
+            f"Unknown --resource-profile '{resource_profile}'. Expected one of: {options}"
+        )
 
-    applied_max_trials = max_trials if max_trials is not None else default_cfg.max_trials
-    applied_folds = folds if folds is not None else default_cfg.folds
-    applied_max_steps_cap = (
-        max_steps_cap if max_steps_cap is not None else default_cfg.max_steps_cap
+    selected_profile = default_cfg.resource_profiles[selected_profile_key]
+
+    if selected_profile_key.startswith("cloud_") and write and not allow_heavy_run:
+        print(
+            "Cloud resource profiles are intended for stronger hardware. "
+            "Refusing local execution without --allow-heavy-run."
+        )
+        raise typer.Exit(code=2)
+
+    applied_max_trials = (
+        max_trials if max_trials is not None else int(selected_profile.max_trials)
     )
-    applied_batch_size = batch_size
-    applied_num_workers = 0
+    applied_folds = folds if folds is not None else int(selected_profile.folds)
+    applied_max_steps_cap = (
+        max_steps_cap if max_steps_cap is not None else int(selected_profile.max_steps_cap)
+    )
+    applied_batch_size = batch_size if batch_size is not None else int(selected_profile.batch_size)
+    applied_num_workers = int(selected_profile.num_workers)
 
-    if profile_name == "local_safe":
-        if max_trials is None:
-            applied_max_trials = default_cfg.profile.max_trials_safe
-        if folds is None:
-            applied_folds = default_cfg.profile.folds_safe
-        if max_steps_cap is None:
-            applied_max_steps_cap = default_cfg.profile.max_steps_cap_safe
-        if batch_size is None:
-            applied_batch_size = default_cfg.profile.batch_size_safe
-        applied_num_workers = default_cfg.profile.num_workers
-
-    tracking_enabled = enable_tracking and not no_mlflow
+    tracking_enabled = (
+        selected_profile.enable_mlflow_by_default or enable_tracking
+    ) and not no_mlflow
 
     cfg = TuningRunConfig(
         zone=zone_u,
@@ -1189,7 +1213,7 @@ def run_focused_tuning_command(
         num_workers=applied_num_workers,
         cpu_only=cpu_only,
         cleanup_after_trial=cleanup_after_trial,
-        resource_profile=profile_name,
+        resource_profile=selected_profile_key,
         allow_heavy_run=allow_heavy_run,
         enable_tracking=tracking_enabled,
         tracking_uri=tracking_uri,
@@ -1199,13 +1223,14 @@ def run_focused_tuning_command(
         output_root=default_cfg.output_root,
         report_root=default_cfg.report_root,
         artifact_root=default_cfg.artifact_root,
-        profile=default_cfg.profile,
+        profile=selected_profile,
+        resource_profiles=default_cfg.resource_profiles,
     )
 
     try:
         cfg.validate()
     except ValueError as exc:
-        if profile_name == "local_safe" and "refused heavy run" in str(exc):
+        if cfg.resource_profile == "local_safe" and "refused heavy run" in str(exc):
             print(str(exc))
             print("Use --allow-heavy-run only when you intentionally accept higher local risk.")
             raise typer.Exit(code=2) from exc
@@ -1238,7 +1263,7 @@ def run_focused_tuning_command(
     print(f"Panel path: {resolved_panel}")
     print(f"Search design path: {resolved_search_design}")
     print(f"Baseline metrics path: {resolved_baseline}")
-    print(f"resource_profile={profile_name} ({cfg.profile.name})")
+    print(f"resource_profile={cfg.resource_profile} ({cfg.profile.name})")
     print(f"models_enabled={cfg.enabled_models}")
     print(
         f"max_trials={cfg.max_trials}, folds={cfg.folds}, horizon_hours={cfg.horizon_hours}, "
@@ -1262,7 +1287,7 @@ def run_focused_tuning_command(
         f"experiment_name={cfg.experiment_name or '(default lmp_focused_tuning)'}"
     )
 
-    if profile_name == "local_safe":
+    if cfg.resource_profile == "local_safe":
         print(
             "local_safe warning: full search remains deferred on this machine; "
             "run only bounded smoke scope unless --allow-heavy-run is explicitly set."
@@ -1291,6 +1316,201 @@ def run_focused_tuning_command(
     print(f"Manifest: {output_paths['manifest']}")
     print(f"Promotion summary: {summary.promotion_summary}")
     print(f"Tracking status: {tracking_status}")
+
+
+@app.command("export-tuning-package")
+def export_tuning_package_command(
+    zone: Annotated[str, typer.Option(help="Zone code, defaults to AEP.")] = "AEP",
+    resource_profile: Annotated[
+        str,
+        typer.Option(help="Resource profile: local_safe, cloud_16gb, cloud_24gb."),
+    ] = "cloud_16gb",
+    models: Annotated[
+        str,
+        typer.Option(help="Comma-separated models list, e.g. TFT,DeepAR."),
+    ] = "TFT,DeepAR",
+    max_trials: Annotated[
+        int | None,
+        typer.Option(min=1, help="Optional trial count override."),
+    ] = None,
+    folds: Annotated[
+        int | None,
+        typer.Option(min=1, help="Optional fold count override."),
+    ] = None,
+    max_steps_cap: Annotated[
+        int | None,
+        typer.Option(min=1, help="Optional max steps cap override."),
+    ] = None,
+    panel_path: Annotated[
+        Path,
+        typer.Option(help="Expected panel path (relative preferred)."),
+    ] = Path("data/processed/panel/single_zone/AEP_panel.parquet"),
+    baseline_metrics_path: Annotated[
+        Path,
+        typer.Option(help="Expected baseline metrics CSV path."),
+    ] = Path("data/cache/backtests/aep_rolling_backtest_aggregate_metrics_latest.csv"),
+    search_design_path: Annotated[
+        Path,
+        typer.Option(help="Expected focused search design JSON path."),
+    ] = Path("data/cache/reports/aep_focused_search_design_latest.json"),
+    write: Annotated[
+        bool,
+        typer.Option(help="Write package manifest under data/cache/tuning_packages/."),
+    ] = False,
+) -> None:
+    """Plan or write a portable package manifest for external focused tuning."""
+    zone_u = zone.upper()
+    base_cfg = load_tuning_config()
+
+    profile_key = resource_profile.strip().lower()
+    if profile_key not in base_cfg.resource_profiles:
+        options = ", ".join(sorted(base_cfg.resource_profiles))
+        raise typer.BadParameter(
+            f"Unknown --resource-profile '{resource_profile}'. Expected one of: {options}"
+        )
+
+    profile = base_cfg.resource_profiles[profile_key]
+    model_tuple = tuple(item.strip() for item in models.split(",") if item.strip())
+    if not model_tuple:
+        raise typer.BadParameter("--models must include at least one model")
+
+    package_cfg = TuningPackageConfig(
+        zone=zone_u,
+        resource_profile=profile_key,
+        models=model_tuple,
+        max_trials=max_trials if max_trials is not None else profile.max_trials,
+        folds=folds if folds is not None else profile.folds,
+        max_steps_cap=max_steps_cap if max_steps_cap is not None else profile.max_steps_cap,
+        panel_path=panel_path,
+        baseline_metrics_path=baseline_metrics_path,
+        search_design_path=search_design_path,
+    )
+
+    manifest = create_tuning_package(package_cfg)
+    issues = validate_tuning_package(manifest)
+    if issues:
+        for issue in issues:
+            print(f"Validation issue: {issue}")
+        raise typer.Exit(code=2)
+
+    print("Portable tuning package plan")
+    print(f"zone={manifest.zone}")
+    print(f"resource_profile={manifest.resource_profile}")
+    print(f"models={','.join(package_cfg.models)}")
+    print(
+        f"max_trials={package_cfg.max_trials}, folds={package_cfg.folds}, "
+        f"max_steps_cap={package_cfg.max_steps_cap}"
+    )
+    print(f"repo_commit={manifest.repo_commit}")
+    print(f"repo_branch={manifest.repo_branch}")
+    print("Cloud command plan:")
+    for cmd in collect_required_command_plan(package_cfg):
+        print(f"- {cmd}")
+    print(f"External run command: {manifest.tuning_command}")
+    print(f"Import command template: {manifest.import_command_template}")
+
+    if not write:
+        print("Dry-run only. Re-run with --write to persist package manifest.")
+        return
+
+    output_paths = write_tuning_package_manifest(manifest)
+    print(f"Package manifest JSON: {output_paths['json']}")
+    print(f"Package manifest Markdown: {output_paths['markdown']}")
+
+
+@app.command("import-tuning-results")
+def import_tuning_results_command(
+    zone: Annotated[str, typer.Option(help="Zone code, defaults to AEP.")] = "AEP",
+    ranked_candidates_path: Annotated[
+        Path | None,
+        typer.Option(help="Path to ranked candidates CSV generated externally."),
+    ] = None,
+    summary_path: Annotated[
+        Path | None,
+        typer.Option(help="Optional path to tuning summary JSON."),
+    ] = None,
+    baseline_metrics_path: Annotated[
+        Path | None,
+        typer.Option(help="Optional local baseline metrics CSV path."),
+    ] = None,
+    write: Annotated[
+        bool,
+        typer.Option(help="Write import validation report under data/cache/reports/."),
+    ] = False,
+) -> None:
+    """Import external ranked results and recompute promotion decisions locally."""
+    zone_u = zone.upper()
+
+    if ranked_candidates_path is None or not ranked_candidates_path.exists():
+        raise typer.BadParameter(
+            "Ranked candidates file not found. Provide --ranked-candidates-path."
+        )
+
+    if summary_path is not None and not summary_path.exists():
+        raise typer.BadParameter(f"Summary file not found: {summary_path}")
+
+    try:
+        base_cfg = load_tuning_config()
+        gate = PromotionGate(
+            coverage_min=base_cfg.coverage_min,
+            coverage_max=base_cfg.coverage_max,
+            mae_regression_limit=base_cfg.mae_regression_limit,
+            require_no_quantile_crossing=True,
+            require_no_interval_collapse=not base_cfg.allow_deepar_if_interval_collapse,
+        )
+    except Exception:
+        gate = PromotionGate(
+            coverage_min=0.70,
+            coverage_max=0.90,
+            mae_regression_limit=0.15,
+            require_no_quantile_crossing=True,
+            require_no_interval_collapse=True,
+        )
+
+    baseline_path = baseline_metrics_path
+    if baseline_path is None:
+        try:
+            _, resolved = load_tuning_baseline_metrics(zone_u, None)
+            baseline_path = resolved
+        except FileNotFoundError as exc:
+            raise typer.BadParameter(
+                "Could not auto-discover baseline metrics. Provide --baseline-metrics-path."
+            ) from exc
+
+    result = import_tuning_results(
+        zone=zone_u,
+        ranked_candidates_path=ranked_candidates_path,
+        summary_path=summary_path,
+        baseline_metrics_path=baseline_path,
+        gate=gate,
+    )
+
+    print("Imported tuning result validation")
+    print(f"zone={result.zone}")
+    print(f"ranked_candidates_path={result.ranked_candidates_path}")
+    print(f"summary_path={result.summary_path or '(not provided)'}")
+    print(f"baseline_metrics_path={result.baseline_metrics_path}")
+    print(f"recomputed_overall_status={result.recomputed_overall_status}")
+    print(f"accepted_count={result.accepted_count}")
+    print(f"rejection_count={result.rejection_count}")
+    print(f"mismatch_count={result.mismatch_count}")
+    for item in result.imported_candidates[:10]:
+        print(
+            "- "
+            f"{item.model}/{item.trial_id}: "
+            f"imported={item.imported_promotion_status or '(missing)'}; "
+            f"recomputed={item.recomputed_promotion_status}; "
+            f"match={item.status_match}; "
+            f"reason={item.recomputed_rejection_reason or 'n/a'}"
+        )
+
+    if not write:
+        print("Dry-run only. Re-run with --write to persist import validation report.")
+        return
+
+    output_paths = write_import_validation_report(result)
+    print(f"Import validation JSON: {output_paths['json']}")
+    print(f"Import validation Markdown: {output_paths['markdown']}")
 
 
 @app.command("inspect-pjm-api")

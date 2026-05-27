@@ -4,15 +4,16 @@ Local-first probabilistic forecasting for PJM day-ahead hourly zonal LMPs.
 
 ## Current status
 
-Implemented and validated through Step 10 resource-safe focused tuning closeout:
-- real AEP single-zone baseline workflow from Step 6 remains reproducible,
+Implemented and validated through portable tuning package and candidate import validation closeout:
+- real AEP single-zone baseline workflow remains reproducible,
 - optional MLflow tracking layer remains available (disabled by default),
 - real rolling-origin AEP backtest execution completed for TFT and DeepAR across 3 folds,
 - calibration diagnostics summarize coverage/width/crossing/bias from rolling forecasts,
 - focused TFT/DeepAR search design generates evidence-driven search spaces,
-- focused tuning execution now supports local resource-safe mode with explicit heavy-run guard,
-- local write-mode smoke tuning completed with bounded settings (2 trials, 1 fold, max_steps_cap 3),
-- full 12-trial first pass remains deferred on this local machine due to hardware stability limits.
+- focused tuning execution supports local resource-safe mode with explicit heavy-run guard,
+- portable tuning package export supports `local_safe`, `cloud_16gb`, and `cloud_24gb` profiles,
+- imported ranked candidates are revalidated locally with promotion recompute and mismatch detection,
+- full heavy tuning remains deferred on this local machine due to hardware limits.
 
 Current real AEP metrics and smoke tuning diagnostics are workflow evidence, not final benchmark claims.
 
@@ -136,39 +137,67 @@ uv run mypy src
 uv run pytest -q
 ```
 
-## Focused tuning execution (resource-safe local mode)
+## Portable tuning package and import validation workflow
 
-Dry-run resource-safe mode:
+Why full tuning is not run locally:
+- this workstation is constrained to roughly 8GB VRAM, 16GB RAM, and around 100GB free disk,
+- earlier heavier tuning attempts were unstable,
+- local execution is intentionally limited to planning and bounded validation.
+
+Resource profiles:
+- `local_safe`: tiny local planning/smoke profile,
+- `cloud_16gb`: intended first external package target,
+- `cloud_24gb`: larger external search profile.
+
+Export package dry-run (no writes):
 
 ```bash
-uv run python -m lmp_forecaster.cli run-focused-tuning \
+uv run python -m lmp_forecaster.cli export-tuning-package \
   --zone AEP \
-  --resource-profile local_safe \
-  --max-trials 2 \
-  --folds 1 \
-  --max-steps-cap 3 \
-  --skip-deepar
+  --resource-profile cloud_16gb \
+  --models TFT,DeepAR \
+  --max-trials 12 \
+  --folds 2
 ```
 
-Write-mode resource-safe smoke run:
+Export package write:
 
 ```bash
-uv run python -m lmp_forecaster.cli run-focused-tuning \
+uv run python -m lmp_forecaster.cli export-tuning-package \
   --zone AEP \
-  --resource-profile local_safe \
-  --max-trials 2 \
-  --folds 1 \
-  --max-steps-cap 3 \
-  --skip-deepar \
+  --resource-profile cloud_16gb \
+  --models TFT,DeepAR \
+  --max-trials 12 \
+  --folds 2 \
   --write
 ```
 
-Behavior summary:
-- local-safe defaults: small batch size, `num_workers=0`, tiny step cap, cleanup-after-trial on,
-- heavy run refused unless `--allow-heavy-run` is explicitly provided,
-- MLflow is optional and disabled by default (`--no-mlflow` supported),
-- full first pass (`max_trials_first_pass=12`, `folds_for_full_first_pass=2`) is documented but deferred locally.
+Import external ranked results and recompute promotion locally:
 
-Smoke tuning interpretation:
-- smoke results validate workflow reliability under hardware constraints,
-- smoke results do not justify final promotion without multi-fold validation on stronger hardware.
+```bash
+uv run python -m lmp_forecaster.cli import-tuning-results \
+  --zone AEP \
+  --ranked-candidates-path <ranked_candidates_csv>
+```
+
+Write import validation report:
+
+```bash
+uv run python -m lmp_forecaster.cli import-tuning-results \
+  --zone AEP \
+  --ranked-candidates-path <ranked_candidates_csv> \
+  --write
+```
+
+Import behavior summary:
+- required candidate schema is enforced,
+- promotion decisions are recomputed locally from baseline metrics,
+- imported promotion labels are treated as advisory only,
+- mismatch between imported label and recomputed status is reported,
+- under-covered or interval-collapse candidates are rejected.
+
+If no candidate is promoted:
+- keep current baseline as active,
+- tune externally with stronger profile (`cloud_16gb` or `cloud_24gb`),
+- import new ranked results,
+- re-run 3-fold rolling backtest for the best candidate only before any promotion.

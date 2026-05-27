@@ -1,5 +1,15 @@
 """Tuning and search design utilities."""
 
+from lmp_forecaster.tuning.package import (
+    TuningPackageConfig,
+    TuningPackageManifest,
+    collect_required_command_plan,
+    collect_required_config_files,
+    collect_required_repo_files,
+    create_tuning_package,
+    validate_tuning_package,
+    write_tuning_package_manifest,
+)
 from lmp_forecaster.tuning.promotion import (
     BaselineMetrics,
     CandidateMetrics,
@@ -7,6 +17,15 @@ from lmp_forecaster.tuning.promotion import (
     PromotionGate,
     evaluate_candidate_against_baseline,
     summarize_promotion_decisions,
+)
+from lmp_forecaster.tuning.result_import import (
+    ImportedCandidate,
+    ImportedEvaluation,
+    ImportedTuningResult,
+    evaluate_imported_candidates,
+    import_tuning_results,
+    validate_imported_result_schema,
+    write_import_validation_report,
 )
 from lmp_forecaster.tuning.search_design import (
     SearchDesignConfig,
@@ -38,19 +57,30 @@ from lmp_forecaster.tuning.tuning_runner import (
 __all__ = [
     "BaselineMetrics",
     "CandidateMetrics",
+    "ImportedCandidate",
+    "ImportedEvaluation",
+    "ImportedTuningResult",
+    "ModelTuningResult",
     "PromotionDecision",
     "PromotionGate",
-    "SearchDesignConfig",
-    "ModelTuningResult",
     "ResourceProfile",
+    "SearchDesignConfig",
     "TrialConfig",
     "TrialResult",
+    "TuningPackageConfig",
+    "TuningPackageManifest",
     "TuningRunConfig",
     "TuningSummary",
     "build_trial_grid_or_optuna_space",
+    "collect_required_command_plan",
+    "collect_required_config_files",
+    "collect_required_repo_files",
+    "create_tuning_package",
     "decide_promotion",
     "discover_latest_calibration_report",
     "evaluate_candidate_against_baseline",
+    "evaluate_imported_candidates",
+    "import_tuning_results",
     "load_baseline_metrics",
     "load_search_design",
     "load_search_design_config",
@@ -62,6 +92,10 @@ __all__ = [
     "run_focused_tuning",
     "run_single_tuning_trial",
     "summarize_promotion_decisions",
+    "validate_imported_result_schema",
+    "validate_tuning_package",
+    "write_import_validation_report",
     "write_search_design",
+    "write_tuning_package_manifest",
     "write_tuning_results",
 ]

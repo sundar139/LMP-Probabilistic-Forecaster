@@ -28,6 +28,7 @@ def test_repo_gitignore_includes_memory_mirror_patterns() -> None:
     for required in [
         "data/cache/tuning/**",
         "data/cache/reports/**",
+        "data/cache/tuning_packages/**",
         "artifacts/",
         "artifacts/tuning/**",
         "mlruns/",
@@ -35,7 +36,7 @@ def test_repo_gitignore_includes_memory_mirror_patterns() -> None:
         assert required in gitignore
 
 
-def test_no_forbidden_word_in_file_or_folder_names() -> None:
+def test_no_forbidden_word_in_file_folder_module_or_test_names() -> None:
     blocked = {
         ".git",
         ".venv",
@@ -50,7 +51,22 @@ def test_no_forbidden_word_in_file_or_folder_names() -> None:
         "checkpoints",
     }
     forbidden = "ph" + "ase"
+
     for path in Path(".").resolve().rglob("*"):
         if any(part in blocked for part in path.parts):
             continue
         assert forbidden not in path.name.lower()
+
+    for path in Path("src").resolve().rglob("*.py"):
+        if any(part in blocked for part in path.parts):
+            continue
+        module_name = path.stem.lower()
+        assert forbidden not in module_name
+
+    for path in Path("tests").resolve().glob("test_*.py"):
+        contents = path.read_text(encoding="utf-8")
+        for line in contents.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("def test_"):
+                name = stripped.split("(", 1)[0].replace("def ", "").lower()
+                assert forbidden not in name
