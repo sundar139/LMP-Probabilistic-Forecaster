@@ -1,5 +1,67 @@
 # Engineering notes
 
+## 2026-05-27 — Step 10 resource-safe focused tuning closeout
+
+Mistake observed:
+- Prior write-mode focused tuning settings were too heavy for local constraints and risked freeze/timeouts.
+- Initial local-safe run still allowed large trial `batch_size` values from search-design specs to leak into actual training overrides.
+- First pytest invocation used an invalid foreground timeout request (>600s) in this tool environment.
+
+Root cause:
+1. Focused tuning runner did not enforce resource-safe caps at trial override merge time.
+2. Search-design parameters were valid for full tuning but too aggressive for local-safe smoke execution unless explicitly clamped.
+3. Tool timeout policy requires max 600s foreground timeout.
+
+Fix implemented:
+1. Added `resource_profile` section to `conf/tuning.yaml` with explicit local-safe constraints and deferred full-search metadata.
+2. Extended tuning config/CLI to support:
+   - `--resource-profile local_safe`
+   - bounded overrides for trials/folds/steps/batch size
+   - `--allow-heavy-run` guard
+   - `--cleanup-after-trial`
+   - `--cpu-only`
+   - `--no-mlflow`
+3. Hardened tuning runner:
+   - local-safe heavy-run refusal unless explicitly allowed
+   - deterministic tiny trial generation by default (no Optuna DB by default)
+   - per-trial cleanup hook (artifact cleanup + GC + CUDA cache clear)
+   - CUDA OOM/resource failure classification into `failed_resource_limited`
+   - runtime_seconds capture for each trial
+   - smoke-scope promotion semantics (`smoke_candidate_requires_full_validation` ready)
+4. Added/updated tests for:
+   - local-safe default limits and heavy-run refusal
+   - dry-run no-write behavior
+   - cleanup hook invocation
+   - CUDA OOM capture without uncaught crash
+   - no Optuna DB creation in default local-safe mode
+   - promotion smoke status and no-promotion summary behavior
+   - generated output paths under ignored directories
+5. Completed bounded write-mode smoke run on local hardware:
+   - zone AEP, TFT-only, trials=2, folds=1, max_steps_cap=3, batch_size=4, num_workers=0
+   - run completed without freeze
+   - honest result: `no_promotion` (coverage below gate)
+6. Updated docs:
+   - `README.md`
+   - `docs/calibration_and_search_design.md`
+   - new `docs/focused_tuning.md`
+
+Regression protection:
+- Added/updated:
+  - `tests/test_tuning_config.py`
+  - `tests/test_cli_tuning.py`
+  - `tests/test_tuning_runner.py`
+  - `tests/test_promotion.py`
+  - `tests/test_agent_memory_policy.py`
+- Full gates pass after fixes with environment cleanup:
+  - Ruff
+  - mypy
+  - pytest
+
+Lesson learned:
+- In constrained local hardware workflows, resource-safe profile constraints must be enforced not only at CLI parsing but also inside per-trial override application.
+- Honest smoke tuning outcomes are valid closeout evidence when full search is explicitly deferred and guarded.
+- Keep tuning workflow reproducible by defaulting to deterministic tiny trials and requiring explicit intent for heavy runs.
+
 ## 2026-05-27 — Step 9 calibration diagnostics + focused search design + agent memory skills
 
 Mistake observed:

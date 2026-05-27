@@ -25,6 +25,15 @@ def test_repo_gitignore_includes_memory_mirror_patterns() -> None:
     ]:
         assert required in gitignore
 
+    for required in [
+        "data/cache/tuning/**",
+        "data/cache/reports/**",
+        "artifacts/",
+        "artifacts/tuning/**",
+        "mlruns/",
+    ]:
+        assert required in gitignore
+
 
 def test_no_forbidden_word_in_file_or_folder_names() -> None:
     blocked = {

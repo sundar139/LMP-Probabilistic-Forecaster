@@ -4,15 +4,17 @@ Local-first probabilistic forecasting for PJM day-ahead hourly zonal LMPs.
 
 ## Current status
 
-Implemented and validated through Step 9 foundation pass:
+Implemented and validated through Step 10 resource-safe focused tuning closeout:
 - real AEP single-zone baseline workflow from Step 6 remains reproducible,
 - optional MLflow tracking layer remains available (disabled by default),
 - real rolling-origin AEP backtest execution completed for TFT and DeepAR across 3 folds,
-- calibration diagnostics module now summarizes coverage/width/crossing/bias from rolling forecasts,
-- focused TFT/DeepAR search design module now generates small, evidence-driven search spaces,
-- full Optuna search is intentionally deferred to the next step.
+- calibration diagnostics summarize coverage/width/crossing/bias from rolling forecasts,
+- focused TFT/DeepAR search design generates evidence-driven search spaces,
+- focused tuning execution now supports local resource-safe mode with explicit heavy-run guard,
+- local write-mode smoke tuning completed with bounded settings (2 trials, 1 fold, max_steps_cap 3),
+- full 12-trial first pass remains deferred on this local machine due to hardware stability limits.
 
-Current real AEP metrics and calibration diagnostics are untuned baseline evidence, not final benchmark claims.
+Current real AEP metrics and smoke tuning diagnostics are workflow evidence, not final benchmark claims.
 
 ## Real AEP baseline evidence snapshot
 
@@ -134,6 +136,39 @@ uv run mypy src
 uv run pytest -q
 ```
 
-## Next step
+## Focused tuning execution (resource-safe local mode)
 
-Proceed to Step 10: execute a small focused search pass for TFT and DeepAR using the generated diagnostics and search design reports; keep scope single-zone AEP and avoid broad tuning.
+Dry-run resource-safe mode:
+
+```bash
+uv run python -m lmp_forecaster.cli run-focused-tuning \
+  --zone AEP \
+  --resource-profile local_safe \
+  --max-trials 2 \
+  --folds 1 \
+  --max-steps-cap 3 \
+  --skip-deepar
+```
+
+Write-mode resource-safe smoke run:
+
+```bash
+uv run python -m lmp_forecaster.cli run-focused-tuning \
+  --zone AEP \
+  --resource-profile local_safe \
+  --max-trials 2 \
+  --folds 1 \
+  --max-steps-cap 3 \
+  --skip-deepar \
+  --write
+```
+
+Behavior summary:
+- local-safe defaults: small batch size, `num_workers=0`, tiny step cap, cleanup-after-trial on,
+- heavy run refused unless `--allow-heavy-run` is explicitly provided,
+- MLflow is optional and disabled by default (`--no-mlflow` supported),
+- full first pass (`max_trials_first_pass=12`, `folds_for_full_first_pass=2`) is documented but deferred locally.
+
+Smoke tuning interpretation:
+- smoke results validate workflow reliability under hardware constraints,
+- smoke results do not justify final promotion without multi-fold validation on stronger hardware.

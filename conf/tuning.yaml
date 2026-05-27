@@ -1,0 +1,40 @@
+tuning:
+  zone: AEP
+  panel_path: data/processed/panel/single_zone/AEP_panel.parquet
+  models:
+    - TFT
+    - DeepAR
+  max_trials_first_pass: 12
+  folds_for_full_first_pass: 2
+  status: deferred_on_local_machine
+  horizon_hours: 24
+  min_train_hours: 2160
+  window_mode: expanding
+  primary_metric: mean_pinball_loss
+  target_coverage: 0.80
+  coverage_min: 0.70
+  coverage_max: 0.90
+  mae_regression_limit: 0.15
+  allow_deepar_if_interval_collapse: false
+  max_steps_cap: 60
+  timeout_minutes: null
+  enable_tracking: false
+  output_root: data/cache/tuning
+  report_root: data/cache/reports
+  artifact_root: artifacts/tuning
+  seed: 42
+
+resource_profile:
+  name: local_8gb_vram_16gb_ram
+  max_trials_safe: 2
+  folds_safe: 1
+  max_steps_cap_safe: 3
+  batch_size_safe: 4
+  num_workers: 0
+  prefer_gpu: true
+  allow_cpu_fallback: true
+  disable_checkpoints: true
+  disable_rich_progress: true
+  cleanup_after_trial: true
+  max_disk_gb_for_generated_outputs: 5
+  full_search_deferred: true

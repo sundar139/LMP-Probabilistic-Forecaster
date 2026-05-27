@@ -88,6 +88,20 @@ from lmp_forecaster.tuning.search_design import (
     recommend_search_strategy,
     write_search_design,
 )
+from lmp_forecaster.tuning.tuning_runner import (
+    TuningRunConfig,
+    load_tuning_config,
+    log_tuning_tracking,
+    planned_tuning_output_paths,
+    run_focused_tuning,
+    write_tuning_results,
+)
+from lmp_forecaster.tuning.tuning_runner import (
+    load_baseline_metrics as load_tuning_baseline_metrics,
+)
+from lmp_forecaster.tuning.tuning_runner import (
+    load_search_design as load_tuning_search_design,
+)
 
 app = typer.Typer(help="LMP forecaster CLI")
 
@@ -148,8 +162,7 @@ def list_sources() -> None:
     print("[bold]Configured sources[/bold]")
     for source in registry.sources:
         print(
-            f"- {source.name} | provider={source.provider} | "
-            f"frequency={source.expected_frequency}"
+            f"- {source.name} | provider={source.provider} | frequency={source.expected_frequency}"
         )
 
 
@@ -601,8 +614,7 @@ def train_single_zone_baselines_command(
     print(f"build_panel_if_missing={cfg.build_panel_if_missing}")
     print(f"horizon={cfg.horizon}, input_size={cfg.input_size}, quantiles={cfg.quantiles}")
     print(
-        f"val_size={cfg.val_size}, test_size={cfg.test_size}, "
-        f"max_steps_smoke={cfg.max_steps_smoke}"
+        f"val_size={cfg.val_size}, test_size={cfg.test_size}, max_steps_smoke={cfg.max_steps_smoke}"
     )
     print(f"skip_tft={cfg.skip_tft}, skip_deepar={cfg.skip_deepar}")
     print(
@@ -1031,6 +1043,254 @@ def design_focused_search_command(
     json_path, md_path = write_search_design(strategy, zone=zone_u)
     print(f"Focused search design JSON: {json_path}")
     print(f"Focused search design Markdown: {md_path}")
+
+
+@app.command("run-focused-tuning")
+def run_focused_tuning_command(
+    zone: Annotated[str, typer.Option(help="Zone code, defaults to AEP.")] = "AEP",
+    panel_path: Annotated[
+        Path,
+        typer.Option(help="Panel parquet path for focused tuning trials."),
+    ] = Path("data/processed/panel/single_zone/AEP_panel.parquet"),
+    search_design_path: Annotated[
+        Path | None,
+        typer.Option(help="Optional focused search design JSON path."),
+    ] = None,
+    baseline_metrics_path: Annotated[
+        Path | None,
+        typer.Option(help="Optional rolling backtest aggregate metrics CSV path."),
+    ] = None,
+    resource_profile: Annotated[
+        str,
+        typer.Option(help="Resource profile name: local_safe or default."),
+    ] = "default",
+    models: Annotated[
+        str,
+        typer.Option(help="Comma-separated models (TFT,DeepAR)."),
+    ] = "TFT,DeepAR",
+    max_trials: Annotated[
+        int | None,
+        typer.Option(min=1, help="Optional total trial budget override."),
+    ] = None,
+    folds: Annotated[
+        int | None,
+        typer.Option(min=1, help="Optional rolling folds per trial override."),
+    ] = None,
+    horizon_hours: Annotated[int, typer.Option(min=1, help="Forecast horizon per fold.")] = 24,
+    max_steps_cap: Annotated[
+        int | None,
+        typer.Option(min=1, help="Optional cap for per-trial training steps."),
+    ] = None,
+    batch_size: Annotated[
+        int | None,
+        typer.Option(min=1, help="Optional batch size override."),
+    ] = None,
+    write: Annotated[
+        bool,
+        typer.Option(help="Execute tuning trials and write reports when set."),
+    ] = False,
+    skip_tft: Annotated[bool, typer.Option(help="Skip TFT model trials.")] = False,
+    skip_deepar: Annotated[bool, typer.Option(help="Skip DeepAR model trials.")] = False,
+    cleanup_after_trial: Annotated[
+        bool,
+        typer.Option(help="Cleanup trial temporary artifacts and release memory after each trial."),
+    ] = True,
+    cpu_only: Annotated[
+        bool,
+        typer.Option(help="Force CPU-only execution for stability."),
+    ] = False,
+    allow_heavy_run: Annotated[
+        bool,
+        typer.Option(help="Explicitly allow budgets above local_safe limits."),
+    ] = False,
+    enable_tracking: Annotated[
+        bool,
+        typer.Option(help="Enable MLflow tracking for this tuning run."),
+    ] = False,
+    no_mlflow: Annotated[
+        bool,
+        typer.Option("--no-mlflow", help="Disable MLflow for this run."),
+    ] = False,
+    tracking_uri: Annotated[
+        str | None,
+        typer.Option(help="Optional MLflow tracking URI override."),
+    ] = None,
+    experiment_name: Annotated[
+        str | None,
+        typer.Option(help="Optional MLflow experiment name override."),
+    ] = None,
+    run_name: Annotated[
+        str | None,
+        typer.Option(help="Optional MLflow run name override."),
+    ] = None,
+    timeout_minutes: Annotated[
+        int | None,
+        typer.Option(help="Optional wall-clock timeout (minutes) for trial loop."),
+    ] = None,
+    dry_run_plan_only: Annotated[
+        bool,
+        typer.Option(help="Force plan-only behavior even if --write is provided."),
+    ] = False,
+) -> None:
+    """Run a bounded focused tuning pass with resource-safe controls."""
+    zone_u = zone.upper()
+    default_cfg = load_tuning_config()
+
+    parsed_models = [m.strip() for m in models.split(",") if m.strip()]
+    if not parsed_models:
+        raise typer.BadParameter("--models must include at least one model name")
+
+    profile_key = resource_profile.strip().lower()
+    profile_name = "local_safe" if profile_key in {"local_safe", "local-safe"} else "default"
+
+    applied_max_trials = max_trials if max_trials is not None else default_cfg.max_trials
+    applied_folds = folds if folds is not None else default_cfg.folds
+    applied_max_steps_cap = (
+        max_steps_cap if max_steps_cap is not None else default_cfg.max_steps_cap
+    )
+    applied_batch_size = batch_size
+    applied_num_workers = 0
+
+    if profile_name == "local_safe":
+        if max_trials is None:
+            applied_max_trials = default_cfg.profile.max_trials_safe
+        if folds is None:
+            applied_folds = default_cfg.profile.folds_safe
+        if max_steps_cap is None:
+            applied_max_steps_cap = default_cfg.profile.max_steps_cap_safe
+        if batch_size is None:
+            applied_batch_size = default_cfg.profile.batch_size_safe
+        applied_num_workers = default_cfg.profile.num_workers
+
+    tracking_enabled = enable_tracking and not no_mlflow
+
+    cfg = TuningRunConfig(
+        zone=zone_u,
+        panel_path=panel_path,
+        search_design_path=search_design_path,
+        baseline_metrics_path=baseline_metrics_path,
+        models=tuple(parsed_models),
+        max_trials=applied_max_trials,
+        folds=applied_folds,
+        horizon_hours=horizon_hours,
+        min_train_hours=default_cfg.min_train_hours,
+        window_mode=default_cfg.window_mode,
+        primary_metric=default_cfg.primary_metric,
+        target_coverage=default_cfg.target_coverage,
+        coverage_min=default_cfg.coverage_min,
+        coverage_max=default_cfg.coverage_max,
+        mae_regression_limit=default_cfg.mae_regression_limit,
+        allow_deepar_if_interval_collapse=default_cfg.allow_deepar_if_interval_collapse,
+        skip_tft=skip_tft,
+        skip_deepar=skip_deepar,
+        seed=default_cfg.seed,
+        max_steps_cap=applied_max_steps_cap,
+        batch_size=applied_batch_size,
+        num_workers=applied_num_workers,
+        cpu_only=cpu_only,
+        cleanup_after_trial=cleanup_after_trial,
+        resource_profile=profile_name,
+        allow_heavy_run=allow_heavy_run,
+        enable_tracking=tracking_enabled,
+        tracking_uri=tracking_uri,
+        experiment_name=experiment_name,
+        run_name=run_name,
+        timeout_minutes=timeout_minutes,
+        output_root=default_cfg.output_root,
+        report_root=default_cfg.report_root,
+        artifact_root=default_cfg.artifact_root,
+        profile=default_cfg.profile,
+    )
+
+    try:
+        cfg.validate()
+    except ValueError as exc:
+        if profile_name == "local_safe" and "refused heavy run" in str(exc):
+            print(str(exc))
+            print("Use --allow-heavy-run only when you intentionally accept higher local risk.")
+            raise typer.Exit(code=2) from exc
+        raise typer.BadParameter(str(exc)) from exc
+
+    paths = get_project_paths()
+    resolved_panel = panel_path if panel_path.is_absolute() else (paths.root / panel_path)
+    if not resolved_panel.exists():
+        print("Real AEP panel is missing. Run build-single-zone-panel before focused tuning.")
+        raise typer.Exit(code=2)
+
+    try:
+        _, resolved_search_design = load_tuning_search_design(zone_u, search_design_path)
+    except FileNotFoundError as exc:
+        print(str(exc))
+        raise typer.Exit(code=2) from exc
+
+    try:
+        _, resolved_baseline = load_tuning_baseline_metrics(zone_u, baseline_metrics_path)
+    except FileNotFoundError as exc:
+        print(str(exc))
+        raise typer.Exit(code=2) from exc
+
+    expected = planned_tuning_output_paths(cfg)
+
+    estimated_trial_fold_units = cfg.max_trials * cfg.folds
+
+    print("[bold]Focused tuning execution[/bold]")
+    print(f"Zone: {zone_u}")
+    print(f"Panel path: {resolved_panel}")
+    print(f"Search design path: {resolved_search_design}")
+    print(f"Baseline metrics path: {resolved_baseline}")
+    print(f"resource_profile={profile_name} ({cfg.profile.name})")
+    print(f"models_enabled={cfg.enabled_models}")
+    print(
+        f"max_trials={cfg.max_trials}, folds={cfg.folds}, horizon_hours={cfg.horizon_hours}, "
+        f"max_steps_cap={cfg.max_steps_cap}, batch_size={cfg.effective_batch_size}, "
+        f"num_workers={cfg.num_workers}, objective={cfg.primary_metric}"
+    )
+    print(
+        "estimated_workload="
+        f"model_count({len(cfg.enabled_models)}) x "
+        f"trial_fold_units({estimated_trial_fold_units})"
+    )
+    print(
+        f"promotion_gate: coverage=[{cfg.coverage_min:.2f},{cfg.coverage_max:.2f}], "
+        f"mae_regression_limit={cfg.mae_regression_limit:.2f}, "
+        f"allow_deepar_if_interval_collapse={cfg.allow_deepar_if_interval_collapse}"
+    )
+    print(
+        "tracking_enabled="
+        f"{cfg.enable_tracking}, "
+        f"tracking_uri={cfg.tracking_uri or '(default file:./mlruns)'}, "
+        f"experiment_name={cfg.experiment_name or '(default lmp_focused_tuning)'}"
+    )
+
+    if profile_name == "local_safe":
+        print(
+            "local_safe warning: full search remains deferred on this machine; "
+            "run only bounded smoke scope unless --allow-heavy-run is explicitly set."
+        )
+
+    print("Expected output paths:")
+    for key, value in expected.items():
+        print(f"- {key}: {value}")
+
+    if not write or dry_run_plan_only:
+        print("Dry-run only. Re-run with --write to execute focused tuning trials.")
+        return
+
+    summary = run_focused_tuning(
+        cfg,
+        search_design_path=search_design_path,
+        baseline_metrics_path=baseline_metrics_path,
+    )
+    output_paths = write_tuning_results(summary)
+    tracking_status = log_tuning_tracking(summary, output_paths)
+
+    print(f"Trial metrics CSV: {output_paths['trials']}")
+    print(f"Ranked candidates CSV: {output_paths['ranked']}")
+    print(f"Summary JSON: {output_paths['summary_json']}")
+    print(f"Summary Markdown: {output_paths['summary_markdown']}")
+    print(f"Manifest: {output_paths['manifest']}")
+    print(f"Promotion summary: {summary.promotion_summary}")
+    print(f"Tracking status: {tracking_status}")
 
 
 @app.command("inspect-pjm-api")

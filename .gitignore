@@ -29,9 +29,12 @@ data/raw/**
 !data/raw/.gitkeep
 data/cache/**
 !data/cache/.gitkeep
+data/cache/tuning/**
+data/cache/reports/**
 data/processed/**
 !data/processed/.gitkeep
 artifacts/
+artifacts/tuning/**
 outputs/
 reports/
 

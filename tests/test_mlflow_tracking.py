@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
+import pandas as pd
+
 from lmp_forecaster.eval.backtest import BacktestFold
 from lmp_forecaster.eval.backtest_runner import (
     BacktestRunConfig,
@@ -19,6 +21,7 @@ from lmp_forecaster.tracking.mlflow_utils import (
     safe_log_params,
     start_mlflow_run,
 )
+from lmp_forecaster.tuning.tuning_runner import TuningRunConfig, log_tuning_tracking
 
 
 class _DummyMlflow(ModuleType):
@@ -42,6 +45,9 @@ class _DummyMlflow(ModuleType):
     def log_params(self, payload: dict[str, str]) -> None:
         self.params.update(payload)
 
+    def log_metric(self, key: str, value: float) -> None:
+        self.metrics[key] = value
+
     def log_metrics(self, payload: dict[str, float]) -> None:
         self.metrics.update(payload)
 
@@ -54,9 +60,7 @@ class _DummyRun:
         self.run_name = run_name
 
     def __enter__(self):
-        return SimpleNamespace(
-            info=SimpleNamespace(run_name=self.run_name, run_id="dummy-run-id")
-        )
+        return SimpleNamespace(info=SimpleNamespace(run_name=self.run_name, run_id="dummy-run-id"))
 
     def __exit__(self, exc_type, exc, tb) -> bool:  # noqa: ANN001
         return False
@@ -188,6 +192,55 @@ def test_mlflow_enabled_backtest_logging_filters_secret_params(monkeypatch, tmp_
     assert status["run_id"] == "dummy-run-id"
 
     # Ensure sensible params are logged and secret-like keys are absent.
+    assert "zone" in dummy.params
+    assert "models" in dummy.params
+    assert all("key" not in key.lower() for key in dummy.params)
+
+
+def test_mlflow_enabled_tuning_logging_filters_secret_params(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    dummy = _DummyMlflow()
+    monkeypatch.setitem(sys.modules, "mlflow", dummy)
+
+    summary = SimpleNamespace(
+        config=TuningRunConfig(
+            enable_tracking=True,
+            tracking_uri="file:./mlruns",
+            experiment_name="tuning_smoke",
+            zone="AEP",
+            max_trials=4,
+            folds=2,
+        ),
+        promotion_summary={
+            "best_promoted_trial": {
+                "model": "TFT",
+                "trial_id": "tft_001",
+                "objective_score": 1.23,
+                "promotion_status": "promoted",
+            }
+        },
+        ranked_candidates=pd.DataFrame(
+            [
+                {
+                    "trial_id": "tft_001",
+                    "MAE_mean": 5.3,
+                    "RMSE_mean": 6.1,
+                    "mean_pinball_loss_mean": 1.6,
+                    "coverage_80_mean": 0.79,
+                }
+            ]
+        ),
+    )
+
+    status = log_tuning_tracking(
+        summary,
+        {
+            "summary_json": Path("data/cache/reports/aep_focused_tuning_summary_x.json"),
+            "trials": Path("data/cache/tuning/aep_focused_tuning_trials_x.csv"),
+        },
+    )
+
+    assert status["enabled"] is True
+    assert status["run_id"] == "dummy-run-id"
     assert "zone" in dummy.params
     assert "models" in dummy.params
     assert all("key" not in key.lower() for key in dummy.params)

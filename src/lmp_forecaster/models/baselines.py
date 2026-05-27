@@ -340,6 +340,7 @@ def train_tft_baseline(
     accel: AcceleratorInfo,
     *,
     data_source_label: str,
+    model_overrides: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
     """Train TFT baseline and return normalized quantile forecast."""
     root = get_project_paths().root
@@ -347,13 +348,15 @@ def train_tft_baseline(
     if not isinstance(tft_cfg, dict):
         raise ValueError("conf/model_tft.yaml missing model mapping")
 
+    merged_cfg = {**tft_cfg, **(model_overrides or {})}
+
     model = TFT(
         h=cfg.horizon,
         input_size=cfg.input_size,
-        hidden_size=int(tft_cfg.get("hidden_size", 64)),
-        n_head=int(tft_cfg.get("n_head", 4)),
-        dropout=float(tft_cfg.get("dropout", 0.1)),
-        learning_rate=float(tft_cfg.get("learning_rate", 0.001)),
+        hidden_size=int(merged_cfg.get("hidden_size", 64)),
+        n_head=int(merged_cfg.get("n_head", 4)),
+        dropout=float(merged_cfg.get("dropout", 0.1)),
+        learning_rate=float(merged_cfg.get("learning_rate", 0.001)),
         loss=MQLoss(quantiles=list(cfg.quantiles)),
         valid_loss=MQLoss(quantiles=list(cfg.quantiles)),
         max_steps=cfg.max_steps_smoke,
@@ -382,6 +385,7 @@ def train_deepar_baseline(
     accel: AcceleratorInfo,
     *,
     data_source_label: str,
+    model_overrides: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
     """Train DeepAR benchmark and return normalized quantile forecast."""
     root = get_project_paths().root
@@ -389,8 +393,10 @@ def train_deepar_baseline(
     if not isinstance(dr_cfg, dict):
         raise ValueError("conf/model_deepar.yaml missing model mapping")
 
+    merged_cfg = {**dr_cfg, **(model_overrides or {})}
+
     dist_loss = DistributionLoss(
-        distribution="StudentT",
+        distribution=str(merged_cfg.get("distribution_loss", "StudentT")),
         quantiles=list(cfg.quantiles),
         level=[cfg.interval_level],
     )
@@ -398,10 +404,10 @@ def train_deepar_baseline(
     model = DeepAR(
         h=cfg.horizon,
         input_size=cfg.input_size,
-        lstm_hidden_size=int(dr_cfg.get("lstm_hidden_size", 64)),
-        lstm_n_layers=int(dr_cfg.get("lstm_n_layers", 2)),
-        lstm_dropout=float(dr_cfg.get("lstm_dropout", 0.1)),
-        learning_rate=float(dr_cfg.get("learning_rate", 0.001)),
+        lstm_hidden_size=int(merged_cfg.get("lstm_hidden_size", 64)),
+        lstm_n_layers=int(merged_cfg.get("lstm_n_layers", 2)),
+        lstm_dropout=float(merged_cfg.get("lstm_dropout", 0.1)),
+        learning_rate=float(merged_cfg.get("learning_rate", 0.001)),
         loss=dist_loss,
         valid_loss=dist_loss,
         max_steps=cfg.max_steps_smoke,
